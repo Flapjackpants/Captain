@@ -1,0 +1,19 @@
+[project]
+name = "captain"
+version = "0.1.0"
+description = "Text-based timeline editing for DaVinci Resolve with local, offline AI transcription"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6>=6.6",
+    "faster-whisper>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
