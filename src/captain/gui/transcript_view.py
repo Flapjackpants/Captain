@@ -1,8 +1,9 @@
-"""Word-flow transcript editor widget.
+"""Line-aware transcript editor widget.
 
-Words render as a wrapping flow (like a document). Selection, Delete/
-Backspace to remove, Ctrl+X / Ctrl+V to cut words and paste them at the
-current position, double-click to jump the Resolve playhead.
+Words render as a wrapping flow grouped into lines. Each line starts with a
+timeline-timecode gutter. Selection, Delete/Backspace to remove, Ctrl+X /
+Ctrl+V to cut/paste, double-click (or line-timecode click) to jump the
+Resolve playhead. Search highlights matching words.
 """
 
 from __future__ import annotations
@@ -17,46 +18,131 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import QListView, QStyle, QStyledItemDelegate
 
-from ..transcript import Transcript
+from ..transcript import (
+    Transcript,
+    TranscriptLine,
+    frame_to_timecode,
+    media_sec_to_timeline_frame,
+)
 
 WORD_ROLE = Qt.ItemDataRole.UserRole + 1  # -> (word_index, removed: bool)
+KIND_ROLE = Qt.ItemDataRole.UserRole + 2  # "line" | "word"
+LINE_ROLE = Qt.ItemDataRole.UserRole + 3  # TranscriptLine
+MATCH_ROLE = Qt.ItemDataRole.UserRole + 4  # bool
 
 
 class TranscriptModel(QAbstractListModel):
-    """Rows follow transcript.order; each row is one word."""
+    """Flat model: line-header rows interleaved with word rows."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.transcript: Transcript | None = None
+        self._rows: list[tuple[str, int | TranscriptLine]] = []
+        self._match_words: set[int] = set()
+        self._timeline_start_frame: int = 0
+        self._fps: float = 24.0
+        self._viewport_width: int = 400
+
+    def set_timeline_context(self, timeline_start_frame: int, fps: float) -> None:
+        self._timeline_start_frame = timeline_start_frame
+        self._fps = fps
+        if self.transcript is not None:
+            self.refresh()
+
+    def set_viewport_width(self, width: int) -> None:
+        width = max(200, width)
+        if width != self._viewport_width:
+            self._viewport_width = width
+            if self.transcript is not None:
+                top = self.index(0)
+                bottom = self.index(self.rowCount() - 1)
+                if top.isValid():
+                    self.dataChanged.emit(top, bottom, [Qt.ItemDataRole.SizeHintRole])
 
     def set_transcript(self, transcript: Transcript | None) -> None:
         self.beginResetModel()
         self.transcript = transcript
+        self._match_words.clear()
+        self._rebuild_rows()
         self.endResetModel()
 
-    def refresh(self) -> None:
-        if self.transcript is not None:
+    def set_matches(self, word_indices: list[int]) -> None:
+        self._match_words = set(word_indices)
+        if self.rowCount():
             top = self.index(0)
             bottom = self.index(self.rowCount() - 1)
-            self.dataChanged.emit(top, bottom)
+            self.dataChanged.emit(top, bottom, [MATCH_ROLE])
+
+    def clear_matches(self) -> None:
+        self.set_matches([])
+
+    def refresh(self) -> None:
+        self.beginResetModel()
+        self._rebuild_rows()
+        self.endResetModel()
+
+    def _rebuild_rows(self) -> None:
+        self._rows = []
+        if self.transcript is None:
+            return
+        for line in self.transcript.lines():
+            self._rows.append(("line", line))
+            for widx in line.word_indices:
+                self._rows.append(("word", widx))
 
     def rowCount(self, parent=QModelIndex()) -> int:
-        return 0 if self.transcript is None else len(self.transcript.order)
+        return len(self._rows)
 
-    def word_index(self, row: int) -> int:
-        return self.transcript.order[row]
+    def word_index(self, row: int) -> int | None:
+        if row < 0 or row >= len(self._rows):
+            return None
+        kind, payload = self._rows[row]
+        if kind == "word":
+            return int(payload)  # type: ignore[arg-type]
+        line: TranscriptLine = payload  # type: ignore[assignment]
+        return line.start_word
+
+    def row_for_word(self, word_index: int) -> int:
+        for i, (kind, payload) in enumerate(self._rows):
+            if kind == "word" and payload == word_index:
+                return i
+        return -1
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
         if self.transcript is None or not index.isValid():
             return None
-        widx = self.transcript.order[index.row()]
+        kind, payload = self._rows[index.row()]
+        if role == KIND_ROLE:
+            return kind
+        if kind == "line":
+            line: TranscriptLine = payload  # type: ignore[assignment]
+            if role == LINE_ROLE:
+                return line
+            if role == Qt.ItemDataRole.DisplayRole:
+                frame = media_sec_to_timeline_frame(
+                    line.start, self._timeline_start_frame, self._fps
+                )
+                return frame_to_timecode(frame, self._fps)
+            if role == Qt.ItemDataRole.ToolTipRole:
+                return f"Jump to {self.data(index, Qt.ItemDataRole.DisplayRole)}"
+            if role == Qt.ItemDataRole.SizeHintRole:
+                return QSize(self._viewport_width - 8, 22)
+            return None
+
+        widx = int(payload)  # type: ignore[arg-type]
         word = self.transcript.words[widx]
         if role == Qt.ItemDataRole.DisplayRole:
             return word.text
         if role == WORD_ROLE:
             return (widx, widx in self.transcript.removed)
+        if role == MATCH_ROLE:
+            return widx in self._match_words
         if role == Qt.ItemDataRole.ToolTipRole:
-            return f"{word.start:.2f}s – {word.end:.2f}s"
+            frame = media_sec_to_timeline_frame(
+                word.start, self._timeline_start_frame, self._fps
+            )
+            tc = frame_to_timecode(frame, self._fps)
+            return f"{tc}  ({word.start:.2f}s – {word.end:.2f}s)"
         return None
 
 
@@ -68,8 +154,18 @@ class WordDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self.font = QFont()
         self.font.setPointSize(14)
+        self.tc_font = QFont()
+        self.tc_font.setPointSize(11)
+        self.tc_font.setStyleHint(QFont.StyleHint.Monospace)
+        self.tc_font.setFamily("Menlo")
 
     def sizeHint(self, option, index) -> QSize:
+        kind = index.data(KIND_ROLE)
+        if kind == "line":
+            hint = index.data(Qt.ItemDataRole.SizeHintRole)
+            if isinstance(hint, QSize):
+                return hint
+            return QSize(option.rect.width() or 400, 22)
         fm = QFontMetrics(self.font)
         text = index.data(Qt.ItemDataRole.DisplayRole) or ""
         return QSize(fm.horizontalAdvance(text) + self.PAD_X * 2,
@@ -77,12 +173,34 @@ class WordDelegate(QStyledItemDelegate):
 
     def paint(self, painter: QPainter, option, index) -> None:
         painter.save()
+        kind = index.data(KIND_ROLE)
+        rect = option.rect
+
+        if kind == "line":
+            painter.setFont(self.tc_font)
+            text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+            if option.state & QStyle.StateFlag.State_Selected:
+                painter.fillRect(rect, option.palette.highlight())
+                color = option.palette.highlightedText().color()
+            else:
+                color = QColor(135, 135, 143)  # TEXT_DIM
+            painter.setPen(QPen(color))
+            painter.drawText(
+                rect.adjusted(4, 0, -4, 0),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                text,
+            )
+            painter.restore()
+            return
+
         painter.setFont(self.font)
         _widx, removed = index.data(WORD_ROLE)
-        rect = option.rect
+        is_match = bool(index.data(MATCH_ROLE))
 
         if option.state & QStyle.StateFlag.State_Selected:
             painter.fillRect(rect, option.palette.highlight())
+        elif is_match:
+            painter.fillRect(rect, QColor(230, 75, 61, 60))
 
         if removed:
             color = QColor(128, 128, 128)
@@ -106,8 +224,8 @@ class WordDelegate(QStyledItemDelegate):
 
 
 class TranscriptView(QListView):
-    edited = Signal()                # any op that changes keep-ranges
-    word_activated = Signal(int)     # word index (double click)
+    edited = Signal()
+    word_activated = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -120,10 +238,9 @@ class TranscriptView(QListView):
         self.setSelectionMode(QListView.SelectionMode.ExtendedSelection)
         self.setSpacing(2)
         self.setUniformItemSizes(False)
-        self.doubleClicked.connect(self._on_double_click)
+        self.doubleClicked.connect(self._on_activate)
+        self.clicked.connect(self._on_click)
         self._clipboard_words: list[int] = []
-
-    # ---- helpers ----------------------------------------------------------
 
     @property
     def transcript(self) -> Transcript | None:
@@ -132,14 +249,46 @@ class TranscriptView(QListView):
     def set_transcript(self, transcript: Transcript | None) -> None:
         self._model.set_transcript(transcript)
 
+    def set_timeline_context(self, timeline_start_frame: int, fps: float) -> None:
+        self._model.set_timeline_context(timeline_start_frame, fps)
+
     def refresh(self) -> None:
         self._model.refresh()
 
+    def set_search_matches(self, word_indices: list[int]) -> None:
+        self._model.set_matches(word_indices)
+
+    def clear_search_matches(self) -> None:
+        self._model.clear_matches()
+
+    def select_word(self, word_index: int, *, scroll: bool = True) -> None:
+        row = self._model.row_for_word(word_index)
+        if row < 0:
+            return
+        index = self._model.index(row)
+        self.selectionModel().select(
+            index,
+            self.selectionModel().SelectionFlag.ClearAndSelect,
+        )
+        self.setCurrentIndex(index)
+        if scroll:
+            self.scrollTo(index, QListView.ScrollHint.PositionAtCenter)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._model.set_viewport_width(self.viewport().width())
+
     def _selected_word_indices(self) -> list[int]:
         rows = sorted(i.row() for i in self.selectionModel().selectedIndexes())
-        return [self._model.word_index(r) for r in rows]
-
-    # ---- ops --------------------------------------------------------------
+        out: list[int] = []
+        for r in rows:
+            kind = self._model.data(self._model.index(r), KIND_ROLE)
+            if kind != "word":
+                continue
+            widx = self._model.word_index(r)
+            if widx is not None:
+                out.append(widx)
+        return out
 
     def delete_selection(self) -> None:
         indices = self._selected_word_indices()
@@ -167,19 +316,28 @@ class TranscriptView(QListView):
         if not self._clipboard_words or self.transcript is None:
             return
         current = self.currentIndex()
-        dest_row = current.row() + 1 if current.isValid() else len(self.transcript.order)
+        # Map current model row to order position among word rows only.
+        if current.isValid():
+            kind = self._model.data(current, KIND_ROLE)
+            widx = self._model.word_index(current.row())
+            if kind == "word" and widx is not None:
+                try:
+                    dest_row = self.transcript.order.index(widx) + 1
+                except ValueError:
+                    dest_row = len(self.transcript.order)
+            else:
+                dest_row = len(self.transcript.order)
+        else:
+            dest_row = len(self.transcript.order)
         moving = set(self._clipboard_words)
-        # dest position counts order entries before dest_row not being moved
         dest_pos = sum(
             1 for i in self.transcript.order[:dest_row] if i not in moving
         )
         self.transcript.move(self._clipboard_words, dest_pos)
         self.transcript.restore(self._clipboard_words)
         self._clipboard_words = []
-        self._model.set_transcript(self.transcript)  # order changed: full reset
+        self._model.set_transcript(self.transcript)
         self.edited.emit()
-
-    # ---- events -------------------------------------------------------------
 
     def keyPressEvent(self, event) -> None:
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
@@ -193,5 +351,13 @@ class TranscriptView(QListView):
         else:
             super().keyPressEvent(event)
 
-    def _on_double_click(self, index: QModelIndex) -> None:
-        self.word_activated.emit(self._model.word_index(index.row()))
+    def _on_activate(self, index: QModelIndex) -> None:
+        widx = self._model.word_index(index.row())
+        if widx is not None:
+            self.word_activated.emit(widx)
+
+    def _on_click(self, index: QModelIndex) -> None:
+        if self._model.data(index, KIND_ROLE) == "line":
+            widx = self._model.word_index(index.row())
+            if widx is not None:
+                self.word_activated.emit(widx)

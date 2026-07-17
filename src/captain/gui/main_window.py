@@ -9,10 +9,12 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -30,6 +32,9 @@ from ..transcript import Transcript, find_repeats, find_silence_gaps
 from .transcript_view import TranscriptView
 
 log = logging.getLogger("Captain.gui")
+
+APPLY_REPLACE = "replace_in_place"
+APPLY_NEW = "new_timeline"
 
 
 class TranscribeWorker(QThread):
@@ -66,7 +71,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Captain")
-        self.resize(900, 640)
+        self.resize(960, 680)
 
         self.cfg = config.load_config()
         self.resolve = create_resolve_handler()
@@ -79,6 +84,8 @@ class MainWindow(QMainWindow):
         self.clips: list[ClipInfo] = []
         self.current_clip: ClipInfo | None = None
         self.worker: TranscribeWorker | None = None
+        self._search_matches: list[int] = []
+        self._search_pos: int = -1
 
         self._build_ui()
         self._connect_resolve()
@@ -93,16 +100,48 @@ class MainWindow(QMainWindow):
 
         top = QHBoxLayout()
         top.setSpacing(8)
-        self.refresh_btn = QPushButton("Refresh Clips")
-        self.refresh_btn.clicked.connect(self._load_clips)
+        self.playhead_btn = QPushButton("Use Playhead Clip")
+        self.playhead_btn.setToolTip(
+            "Select the video clip currently under the Resolve playhead"
+        )
+        self.playhead_btn.clicked.connect(self._use_playhead_clip)
         self.clip_combo = QComboBox()
-        self.clip_combo.setMinimumWidth(320)
+        self.clip_combo.setMinimumWidth(240)
+        self.clip_combo.setToolTip("Fallback: pick any clip from the current timeline")
         self.transcribe_btn = QPushButton("Transcribe")
         self.transcribe_btn.clicked.connect(self._transcribe)
-        top.addWidget(self.refresh_btn)
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self._load_clips)
+        top.addWidget(self.playhead_btn)
         top.addWidget(self.clip_combo, stretch=1)
         top.addWidget(self.transcribe_btn)
+        top.addWidget(self.refresh_btn)
         layout.addLayout(top)
+
+        search_row = QHBoxLayout()
+        search_row.setSpacing(8)
+        search_row.addWidget(QLabel("Search"))
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Find words in the transcript…")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.textChanged.connect(self._on_search_text)
+        self.search_edit.returnPressed.connect(self._find_next)
+        self.search_prev_btn = QPushButton("Prev")
+        self.search_prev_btn.clicked.connect(self._find_prev)
+        self.search_next_btn = QPushButton("Next")
+        self.search_next_btn.clicked.connect(self._find_next)
+        self.search_count = QLabel("")
+        self.search_count.setObjectName("stage")
+        self.search_count.setMinimumWidth(64)
+        search_row.addWidget(self.search_edit, stretch=1)
+        search_row.addWidget(self.search_prev_btn)
+        search_row.addWidget(self.search_next_btn)
+        search_row.addWidget(self.search_count)
+        layout.addLayout(search_row)
+
+        QShortcut(QKeySequence("Ctrl+G"), self, self._find_next)
+        QShortcut(QKeySequence("Ctrl+Shift+G"), self, self._find_prev)
+        QShortcut(QKeySequence("Ctrl+F"), self, lambda: self.search_edit.setFocus())
 
         self.view = TranscriptView()
         self.view.setObjectName("transcript")
@@ -113,7 +152,8 @@ class MainWindow(QMainWindow):
         hint = QLabel(
             "Select words, then: Delete removes • Cmd/Ctrl+X cuts • "
             "Cmd/Ctrl+V pastes after the current word • Cmd/Ctrl+Z restores "
-            "selection • double-click jumps the Resolve playhead"
+            "selection • double-click a word (or click a line timecode) jumps "
+            "the Resolve playhead • Cmd/Ctrl+F search"
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -125,12 +165,23 @@ class MainWindow(QMainWindow):
         self.trim_silence_btn.clicked.connect(self._trim_silence)
         self.trim_repeats_btn = QPushButton("Remove Repeats")
         self.trim_repeats_btn.clicked.connect(self._trim_repeats)
-        self.apply_btn = QPushButton("Apply → New Timeline")
-        self.apply_btn.setObjectName("accent")
-        self.apply_btn.clicked.connect(self._apply)
         bottom.addWidget(self.trim_silence_btn)
         bottom.addWidget(self.trim_repeats_btn)
         bottom.addStretch(1)
+
+        bottom.addWidget(QLabel("Apply"))
+        self.apply_mode_combo = QComboBox()
+        self.apply_mode_combo.addItem("Replace clip in place", APPLY_REPLACE)
+        self.apply_mode_combo.addItem("New timeline", APPLY_NEW)
+        mode = self.cfg.get("apply_mode", APPLY_REPLACE)
+        idx = self.apply_mode_combo.findData(mode)
+        self.apply_mode_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.apply_mode_combo.currentIndexChanged.connect(self._on_apply_mode_changed)
+        bottom.addWidget(self.apply_mode_combo)
+
+        self.apply_btn = QPushButton("Apply → Replace Clip")
+        self.apply_btn.setObjectName("accent")
+        self.apply_btn.clicked.connect(self._apply)
         bottom.addWidget(self.apply_btn)
         layout.addLayout(bottom)
 
@@ -151,6 +202,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
         self._set_editing_enabled(False)
+        self._update_apply_button()
 
     def _show_progress(self, visible: bool) -> None:
         self._progress_widgets.setVisible(visible)
@@ -160,11 +212,34 @@ class MainWindow(QMainWindow):
             self.progress.setValue(0)
 
     def _set_editing_enabled(self, on: bool) -> None:
-        for widget in (self.trim_silence_btn, self.trim_repeats_btn, self.apply_btn):
+        for widget in (
+            self.trim_silence_btn,
+            self.trim_repeats_btn,
+            self.apply_btn,
+            self.apply_mode_combo,
+            self.search_edit,
+            self.search_prev_btn,
+            self.search_next_btn,
+        ):
             widget.setEnabled(on)
 
     def _status(self, message: str) -> None:
         self.statusBar().showMessage(message)
+
+    def _apply_mode(self) -> str:
+        data = self.apply_mode_combo.currentData()
+        return data if isinstance(data, str) else APPLY_REPLACE
+
+    def _on_apply_mode_changed(self) -> None:
+        self.cfg["apply_mode"] = self._apply_mode()
+        config.save_config(self.cfg)
+        self._update_apply_button()
+
+    def _update_apply_button(self) -> None:
+        if self._apply_mode() == APPLY_NEW:
+            self.apply_btn.setText("Apply → New Timeline")
+        else:
+            self.apply_btn.setText("Apply → Replace Clip")
 
     # ---- Resolve ----------------------------------------------------------
 
@@ -191,15 +266,52 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Captain", f"Could not list clips:\n{e}")
             return
+        prev_id = self.current_clip.clip_id if self.current_clip else None
         self.clip_combo.clear()
         for c in self.clips:
             label = f"[{c.track_type[0].upper()}{c.track_index}] {c.name}"
             self.clip_combo.addItem(label)
+        if prev_id:
+            for i, c in enumerate(self.clips):
+                if c.clip_id == prev_id:
+                    self.clip_combo.setCurrentIndex(i)
+                    break
         try:
             tname = self.resolve.timeline_name()
         except Exception:
             tname = "(unknown)"
         self._status(f"{len(self.clips)} clips found in '{tname}'")
+
+    def _select_clip_in_combo(self, clip: ClipInfo) -> None:
+        for i, c in enumerate(self.clips):
+            if c.clip_id == clip.clip_id:
+                self.clip_combo.setCurrentIndex(i)
+                return
+        # Not in list (e.g. filtered); keep current_clip separately and show label.
+        self.clips.append(clip)
+        self.clip_combo.addItem(
+            f"[{clip.track_type[0].upper()}{clip.track_index}] {clip.name}"
+        )
+        self.clip_combo.setCurrentIndex(self.clip_combo.count() - 1)
+
+    def _use_playhead_clip(self) -> None:
+        if not self.resolve.connected:
+            self._connect_resolve()
+            if not self.resolve.connected:
+                return
+        try:
+            # Warm the host clip cache / combo list.
+            self._load_clips()
+            clip = self.resolve.clip_under_playhead()
+        except ResolveError as e:
+            QMessageBox.warning(self, "Captain", str(e))
+            return
+        except Exception as e:
+            QMessageBox.warning(self, "Captain", f"Could not read playhead clip:\n{e}")
+            return
+        self.current_clip = clip
+        self._select_clip_in_combo(clip)
+        self._status(f"Using playhead clip: {clip.name}")
 
     # ---- transcription ------------------------------------------------------
 
@@ -212,7 +324,11 @@ class MainWindow(QMainWindow):
     def _transcribe(self) -> None:
         row = self.clip_combo.currentIndex()
         if row < 0 or row >= len(self.clips):
-            QMessageBox.information(self, "Captain", "Select a clip first.")
+            QMessageBox.information(
+                self,
+                "Captain",
+                "Select a clip first (Use Playhead Clip, or pick from the dropdown).",
+            )
             return
         self.current_clip = self.clips[row]
 
@@ -241,11 +357,14 @@ class MainWindow(QMainWindow):
 
     def _on_progress(self, fraction: float, message: str) -> None:
         if fraction < 0:
-            # Indeterminate stage (e.g. loading the model into memory).
             self.progress.setRange(0, 0)
         else:
             self.progress.setRange(0, 100)
-            self.progress.setValue(int(fraction * 100))
+            # Keep a visible tick once download has started (int(0.5%) == 0).
+            pct = int(fraction * 100)
+            if 0 < fraction < 1 and pct == 0:
+                pct = 1
+            self.progress.setValue(pct)
         self.stage_label.setText(message)
         self._status(message)
 
@@ -261,8 +380,12 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Captain", f"Transcription failed:\n{message}")
 
     def _show_transcript(self, transcript: Transcript) -> None:
+        clip = self.current_clip
+        if clip is not None:
+            self.view.set_timeline_context(clip.timeline_start_frame, clip.fps)
         self.view.set_transcript(transcript)
         self._set_editing_enabled(True)
+        self._on_search_text(self.search_edit.text())
         self._status(
             f"{len(transcript.words)} words • {transcript.duration:.1f}s • "
             "edit, then Apply"
@@ -279,6 +402,47 @@ class MainWindow(QMainWindow):
         self._save_session(transcript)
         kept = len([i for i in transcript.order if i not in transcript.removed])
         self._status(f"{kept}/{len(transcript.words)} words kept")
+        self._on_search_text(self.search_edit.text())
+
+    # ---- search -------------------------------------------------------------
+
+    def _on_search_text(self, text: str) -> None:
+        transcript = self.view.transcript
+        if transcript is None or not text.strip():
+            self._search_matches = []
+            self._search_pos = -1
+            self.view.clear_search_matches()
+            self.search_count.setText("")
+            return
+        self._search_matches = transcript.find_matches(text)
+        self.view.set_search_matches(self._search_matches)
+        self._search_pos = -1
+        n = len(self._search_matches)
+        self.search_count.setText(f"0 / {n}" if n else "0 / 0")
+        if n:
+            self._find_next()
+
+    def _find_next(self) -> None:
+        if not self._search_matches:
+            return
+        self._search_pos = (self._search_pos + 1) % len(self._search_matches)
+        self._activate_search_hit()
+
+    def _find_prev(self) -> None:
+        if not self._search_matches:
+            return
+        self._search_pos = (self._search_pos - 1) % len(self._search_matches)
+        self._activate_search_hit()
+
+    def _activate_search_hit(self) -> None:
+        if not self._search_matches or self._search_pos < 0:
+            return
+        widx = self._search_matches[self._search_pos]
+        self.view.select_word(widx)
+        self.search_count.setText(
+            f"{self._search_pos + 1} / {len(self._search_matches)}"
+        )
+        self._jump_to_word(widx)
 
     # ---- auto-trim -----------------------------------------------------------
 
@@ -308,6 +472,7 @@ class MainWindow(QMainWindow):
         self.view.refresh()
         self._save_session(transcript)
         self._status(f"Removed {count} repeated words in {len(groups)} phrases")
+        self._on_search_text(self.search_edit.text())
 
     # ---- playhead sync ---------------------------------------------------------
 
@@ -335,8 +500,52 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Captain", "Nothing left to keep.")
             return
         frames = seconds_to_source_frames(keep, clip)
-        new_name = f"{self.resolve.timeline_name()}{self.cfg['new_timeline_suffix']}"
+        mode = self._apply_mode()
 
+        if mode == APPLY_REPLACE:
+            self._apply_replace(clip, frames)
+        else:
+            self._apply_new_timeline(clip, frames)
+
+    def _apply_replace(self, clip: ClipInfo, frames: list[tuple[int, int]]) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Captain",
+            f"Replace '{clip.name}' on the current timeline with "
+            f"{len(frames)} edited segment(s)?\n\n"
+            "This modifies the current timeline (ripple delete + insert).",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            # Ensure host has TimelineItem cached.
+            self.resolve.list_clips()
+            ok = self.resolve.replace_clip_in_place(clip, frames)
+            if ok:
+                self._status(
+                    f"Replaced '{clip.name}' in place ({len(frames)} segments)"
+                )
+                QMessageBox.information(
+                    self,
+                    "Captain",
+                    f"Replaced '{clip.name}' with {len(frames)} segment(s) "
+                    "on the current timeline.",
+                )
+                self._load_clips()
+            else:
+                QMessageBox.critical(
+                    self,
+                    "Captain",
+                    "In-place replace failed. See the log for details.",
+                )
+        except ResolveError as e:
+            QMessageBox.critical(self, "Captain", str(e))
+
+    def _apply_new_timeline(
+        self, clip: ClipInfo, frames: list[tuple[int, int]]
+    ) -> None:
+        new_name = f"{self.resolve.timeline_name()}{self.cfg['new_timeline_suffix']}"
         try:
             xml = build_fcp7_xml(clip, frames, new_name)
             xml_path = Path(tempfile.mkdtemp(prefix="captain_")) / "captain.xml"
@@ -348,13 +557,15 @@ class MainWindow(QMainWindow):
             if ok:
                 self._status(f"Created timeline '{new_name}' ({len(frames)} segments)")
                 QMessageBox.information(
-                    self, "Captain",
+                    self,
+                    "Captain",
                     f"New timeline '{new_name}' created with {len(frames)} segments.\n"
                     "Your original timeline is untouched.",
                 )
             else:
                 QMessageBox.critical(
-                    self, "Captain",
+                    self,
+                    "Captain",
                     "Assembly failed via both XML import and AppendToTimeline. "
                     "See the log for details.",
                 )

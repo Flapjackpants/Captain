@@ -115,6 +115,28 @@ def _model_downloaded(directory: Path) -> bool:
     return (directory / "model.bin").is_file() and (directory / "config.json").is_file()
 
 
+def _hub_snapshot_dir(models_dir: str | Path, repo_id: str) -> Path | None:
+    """Return a complete HF hub-cache snapshot under models_dir, if any."""
+    hub = Path(models_dir) / f"models--{repo_id.replace('/', '--')}"
+    snapshots = hub / "snapshots"
+    if not snapshots.is_dir():
+        return None
+    for snap in snapshots.iterdir():
+        if snap.is_dir() and _model_downloaded(snap):
+            return snap
+    return None
+
+
+def find_local_model(model_name: str, models_dir: str) -> str | None:
+    """Locate an already-downloaded model (flat local_dir or HF hub cache)."""
+    repo_id = _repo_for_model(model_name)
+    flat = Path(models_dir) / repo_id.replace("/", "--")
+    if _model_downloaded(flat):
+        return str(flat)
+    snap = _hub_snapshot_dir(models_dir, repo_id)
+    return str(snap) if snap is not None else None
+
+
 def download_model(
     model_name: str,
     models_dir: str,
@@ -127,9 +149,9 @@ def download_model(
     which works regardless of huggingface_hub's internal tqdm handling.
     """
     repo_id = _repo_for_model(model_name)
-    target = Path(models_dir) / repo_id.replace("/", "--")
-    if _model_downloaded(target):
-        return str(target)
+    existing = find_local_model(model_name, models_dir)
+    if existing:
+        return existing
 
     from huggingface_hub import HfApi, snapshot_download
 
@@ -143,12 +165,16 @@ def download_model(
         log.warning("Could not fetch model size for %s", repo_id, exc_info=True)
 
     stop = threading.Event()
+    hub_cache = Path(models_dir) / f"models--{repo_id.replace('/', '--')}"
+
     if progress and total_bytes:
         def _poll() -> None:
             while not stop.wait(0.3):
-                done = _dir_bytes(target)
+                # Absolute on-disk size (includes incomplete blobs as they grow).
+                done = min(_dir_bytes(hub_cache), total_bytes)
+                fraction = min(done / total_bytes, 0.99) if total_bytes else 0.0
                 progress(
-                    min(done / total_bytes, 0.99),
+                    fraction,
                     f"Downloading Whisper model '{model_name}'... "
                     f"{done / 1e6:,.0f} / {total_bytes / 1e6:,.0f} MB",
                 )
@@ -158,14 +184,23 @@ def download_model(
         progress(-1.0, f"Downloading Whisper model '{model_name}'...")
 
     try:
+        # Prefer hub-cache layout so we share storage with faster-whisper's
+        # default downloader and can resume across runs.
         snapshot_download(
             repo_id,
             allow_patterns=list(_MODEL_FILE_PATTERNS),
-            local_dir=str(target),
+            cache_dir=models_dir,
         )
     finally:
         stop.set()
-    return str(target)
+
+    resolved = find_local_model(model_name, models_dir)
+    if not resolved:
+        raise RuntimeError(
+            f"Whisper model '{model_name}' download finished but files were not found "
+            f"under {models_dir}."
+        )
+    return resolved
 
 
 class Transcriber:
@@ -229,14 +264,18 @@ class Transcriber:
         )
 
         words: list[Word] = []
-        for seg in segments:
+        for seg_id, seg in enumerate(segments):
             for w in seg.words or []:
+                text = w.word.strip()
+                if not text:
+                    continue
                 words.append(
                     Word(
                         index=len(words),
-                        text=w.word.strip(),
+                        text=text,
                         start=float(w.start),
                         end=float(w.end),
+                        segment_id=seg_id,
                     )
                 )
             if progress and duration > 0:

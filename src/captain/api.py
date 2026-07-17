@@ -21,6 +21,8 @@ import sys
 from dataclasses import dataclass
 from typing import Any
 
+from .transcript import frame_to_timecode
+
 log = logging.getLogger("Captain.api")
 
 ENV_BRIDGE_URL = "CAPTAIN_BRIDGE_URL"
@@ -247,6 +249,63 @@ class ResolveHandler:
                     clips.append(clip)
         return clips
 
+    def clip_under_playhead(self) -> ClipInfo:
+        """Return the video clip under the Edit-page playhead."""
+        timeline = self._timeline()
+        item = timeline.GetCurrentVideoItem()
+        if item is None:
+            raise ResolveError(
+                "No video clip under the playhead. Move the playhead over a clip."
+            )
+        clips = self.list_clips()
+        start = int(item.GetStart())
+        source_start = int(item.GetSourceStartFrame())
+        for clip in clips:
+            if (
+                clip.track_type == "video"
+                and clip.timeline_start_frame == start
+                and clip.source_start_frame == source_start
+            ):
+                if not clip.file_path:
+                    raise ResolveError(
+                        f"Clip '{clip.name}' has no media file path and cannot be transcribed."
+                    )
+                return clip
+        # Fallback: build ClipInfo from the TimelineItem directly.
+        track_type, track_index = "video", 1
+        try:
+            info = item.GetTrackTypeAndIndex()
+            if info and len(info) >= 2:
+                track_type, track_index = str(info[0]), int(info[1])
+        except Exception:
+            pass
+        fps = self.timeline_fps()
+        mp_item = item.GetMediaPoolItem()
+        file_path = ""
+        if mp_item is not None:
+            file_path = mp_item.GetClipProperty("File Path") or ""
+        if not file_path:
+            raise ResolveError(
+                f"Clip '{item.GetName()}' has no media file path and cannot be transcribed."
+            )
+        clip_id = _make_clip_id(track_type, track_index, start, source_start)
+        clip = ClipInfo(
+            clip_id=clip_id,
+            name=item.GetName(),
+            track_type=track_type,
+            track_index=track_index,
+            timeline_start_frame=start,
+            timeline_end_frame=int(item.GetEnd()),
+            source_start_frame=source_start,
+            source_end_frame=int(item.GetSourceEndFrame()),
+            file_path=file_path,
+            fps=fps,
+            item=item,
+            media_pool_item=mp_item,
+        )
+        self._clips[clip_id] = clip
+        return clip
+
     # ---- playhead sync --------------------------------------------------
 
     def jump_to_clip_second(self, clip: ClipInfo | str, second_in_clip: float) -> None:
@@ -259,16 +318,7 @@ class ResolveHandler:
         source_offset = second_in_clip - clip.source_start_sec
         frame = clip.timeline_start_frame + int(round(source_offset * clip.fps))
         frame = max(clip.timeline_start_frame, min(frame, clip.timeline_end_frame - 1))
-        timeline.SetCurrentTimecode(self._frame_to_timecode(frame, clip.fps))
-
-    @staticmethod
-    def _frame_to_timecode(frame: int, fps: float) -> str:
-        fps_i = max(1, int(round(fps)))
-        ff = frame % fps_i
-        ss = (frame // fps_i) % 60
-        mm = (frame // (fps_i * 60)) % 60
-        hh = frame // (fps_i * 3600)
-        return f"{hh:02d}:{mm:02d}:{ss:02d}:{ff:02d}"
+        timeline.SetCurrentTimecode(frame_to_timecode(frame, clip.fps))
 
     # ---- assemble -------------------------------------------------------
 
@@ -320,6 +370,65 @@ class ResolveHandler:
                 return False
         return True
 
+    def replace_clip_in_place(
+        self,
+        clip: ClipInfo | str,
+        keep_ranges_frames: list[tuple[int, int]] | list[list[int]],
+    ) -> bool:
+        """Ripple-delete the clip on the current timeline and insert keep ranges
+        at the same record position / track."""
+        if not self._clips:
+            self.list_clips()
+        host_clip = self._lookup_clip(clip)
+        if host_clip.item is None or host_clip.media_pool_item is None:
+            self.list_clips()
+            host_clip = self._lookup_clip(clip)
+        if host_clip.item is None:
+            raise ResolveError(
+                f"Clip '{host_clip.name}' is not available on the current timeline."
+            )
+        if host_clip.media_pool_item is None:
+            raise ResolveError(
+                f"Clip '{host_clip.name}' has no media pool item; cannot replace."
+            )
+        ranges = [(int(s), int(e)) for s, e in keep_ranges_frames]
+        if not ranges:
+            raise ResolveError("Nothing left to keep.")
+
+        timeline = self._timeline()
+        item = host_clip.item
+        record_frame = int(item.GetStart())
+        track_index = host_clip.track_index
+        media_type = 1 if host_clip.track_type == "video" else 2
+
+        if not timeline.DeleteClips([item], True):
+            raise ResolveError(f"Failed to delete clip '{host_clip.name}' from the timeline.")
+
+        media_pool = self._project().GetMediaPool()
+        entries = []
+        rf = record_frame
+        for start, end in ranges:
+            duration = max(0, end - start)
+            entries.append(
+                {
+                    "mediaPoolItem": host_clip.media_pool_item,
+                    "startFrame": start,
+                    "endFrame": end,
+                    "trackIndex": track_index,
+                    "recordFrame": rf,
+                    "mediaType": media_type,
+                }
+            )
+            rf += duration
+
+        for i in range(0, len(entries), 50):
+            if not media_pool.AppendToTimeline(entries[i : i + 50]):
+                log.warning("Replace AppendToTimeline chunk %d failed", i // 50)
+                return False
+        # Cache is stale after timeline mutation.
+        self._clips.clear()
+        return True
+
     # ---- bridge dispatch (host process) ---------------------------------
 
     def bridge_dispatch(self, method: str, params: dict) -> Any:
@@ -331,6 +440,8 @@ class ResolveHandler:
             return self.timeline_fps()
         if method == "list_clips":
             return [c.to_dict() for c in self.list_clips()]
+        if method == "clip_under_playhead":
+            return self.clip_under_playhead().to_dict()
         if method == "jump_to_clip_second":
             self.jump_to_clip_second(params["clip_id"], float(params["second_in_clip"]))
             return True
@@ -341,6 +452,9 @@ class ResolveHandler:
             return bool(
                 self.assemble_append(params["clip_id"], ranges, params["new_name"])
             )
+        if method == "replace_clip_in_place":
+            ranges = [tuple(r) for r in params["keep_ranges_frames"]]
+            return bool(self.replace_clip_in_place(params["clip_id"], ranges))
         raise ResolveError(f"Unknown bridge method: {method}")
 
 
@@ -385,6 +499,9 @@ class BridgedResolveHandler:
     def list_clips(self) -> list[ClipInfo]:
         return [ClipInfo.from_dict(d) for d in self._client.call("list_clips")]
 
+    def clip_under_playhead(self) -> ClipInfo:
+        return ClipInfo.from_dict(self._client.call("clip_under_playhead"))
+
     def jump_to_clip_second(self, clip: ClipInfo | str, second_in_clip: float) -> None:
         clip_id = clip if isinstance(clip, str) else clip.clip_id
         self._client.call(
@@ -409,6 +526,22 @@ class BridgedResolveHandler:
                     "clip_id": clip_id,
                     "keep_ranges_frames": [list(r) for r in keep_ranges_frames],
                     "new_name": new_name,
+                },
+            )
+        )
+
+    def replace_clip_in_place(
+        self,
+        clip: ClipInfo | str,
+        keep_ranges_frames: list[tuple[int, int]],
+    ) -> bool:
+        clip_id = clip if isinstance(clip, str) else clip.clip_id
+        return bool(
+            self._client.call(
+                "replace_clip_in_place",
+                {
+                    "clip_id": clip_id,
+                    "keep_ranges_frames": [list(r) for r in keep_ranges_frames],
                 },
             )
         )

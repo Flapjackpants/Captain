@@ -120,3 +120,71 @@ def test_json_roundtrip():
     assert tr2.removed == tr.removed
     assert tr2.silence_cuts == tr.silence_cuts
     assert tr2.keep_ranges() == tr.keep_ranges()
+
+
+def test_segment_id_json_roundtrip():
+    words = [
+        Word(index=0, text="hello", start=0.0, end=0.3, segment_id=0),
+        Word(index=1, text="world", start=0.35, end=0.6, segment_id=0),
+        Word(index=2, text="again", start=1.2, end=1.5, segment_id=1),
+    ]
+    tr = Transcript(words=words, duration=2.0)
+    tr2 = Transcript.from_json(tr.to_json())
+    assert [w.segment_id for w in tr2.words] == [0, 0, 1]
+
+
+def test_lines_by_segment_id():
+    words = [
+        Word(index=0, text="hello", start=0.0, end=0.3, segment_id=0),
+        Word(index=1, text="world", start=0.35, end=0.6, segment_id=0),
+        Word(index=2, text="again", start=1.2, end=1.5, segment_id=1),
+    ]
+    tr = Transcript(words=words, duration=2.0)
+    lines = tr.lines()
+    assert len(lines) == 2
+    assert lines[0].word_indices == (0, 1)
+    assert lines[1].word_indices == (2,)
+    assert lines[0].start == 0.0
+    assert lines[1].start == 1.2
+
+
+def test_lines_by_pause_when_no_segments():
+    # All segment_id=0 and large gap → two lines via pause grouping
+    words = [
+        Word(index=0, text="a", start=0.0, end=0.2, segment_id=0),
+        Word(index=1, text="b", start=0.25, end=0.4, segment_id=0),
+        Word(index=2, text="c", start=2.0, end=2.2, segment_id=0),
+    ]
+    tr = Transcript(words=words, duration=3.0)
+    # has_segments is False when all segment_id are 0
+    lines = tr.lines(pause_gap=0.6)
+    assert len(lines) == 2
+    assert lines[0].word_indices == (0, 1)
+    assert lines[1].word_indices == (2,)
+
+
+def test_find_matches_skips_removed():
+    tr = make_transcript(["Hello", "world", "hello", "there"])
+    tr.delete([2])
+    assert tr.find_matches("hello") == [0]
+    assert tr.find_matches("hello", skip_removed=False) == [0, 2]
+    assert tr.find_matches("WORLD") == [1]
+    assert tr.find_matches("") == []
+
+
+def test_frame_to_timecode_and_media_offset():
+    from captain.transcript import frame_to_timecode, media_sec_to_timeline_frame
+
+    assert frame_to_timecode(0, 24) == "00:00:00:00"
+    assert frame_to_timecode(24, 24) == "00:00:01:00"
+    assert frame_to_timecode(25, 24) == "00:00:01:01"
+    frame = media_sec_to_timeline_frame(1.0, timeline_start_frame=100, fps=24.0)
+    assert frame == 124
+    assert frame_to_timecode(frame, 24) == "00:00:05:04"
+
+
+def test_apply_mode_default():
+    from captain import config
+
+    assert config.DEFAULTS["apply_mode"] == "replace_in_place"
+

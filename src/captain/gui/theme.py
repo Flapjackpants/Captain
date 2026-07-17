@@ -88,6 +88,20 @@ QComboBox QAbstractItemView {{
     outline: none;
 }}
 
+QLineEdit {{
+    background-color: {BG_INPUT};
+    border: 1px solid {BORDER};
+    border-radius: 4px;
+    padding: 5px 10px;
+    selection-background-color: {ACCENT_DARK};
+}}
+QLineEdit:focus {{
+    border-color: {BORDER_LIGHT};
+}}
+QLineEdit:disabled {{
+    color: #5b5b63;
+}}
+
 QListView#transcript {{
     background-color: {BG_EDITOR};
     border: 1px solid {BORDER};

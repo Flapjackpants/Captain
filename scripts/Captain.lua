@@ -419,6 +419,70 @@ local function list_clips()
     return out
 end
 
+local function clip_under_playhead()
+    local timeline = current_timeline()
+    local item = timeline:GetCurrentVideoItem()
+    if not item then
+        error("No video clip under the playhead. Move the playhead over a clip.")
+    end
+    local listed = list_clips()
+    local start_f = safe_number(item:GetStart(), 0)
+    local source_start = safe_number(item:GetSourceStartFrame(), 0)
+    for _, clip in ipairs(listed) do
+        if clip.track_type == "video"
+            and clip.timeline_start_frame == start_f
+            and clip.source_start_frame == source_start then
+            if not clip.file_path or clip.file_path == "" then
+                error("Clip '" .. tostring(clip.name) .. "' has no media file path and cannot be transcribed.")
+            end
+            return clip
+        end
+    end
+    local track_type, track_index = "video", 1
+    local ok_ti, info = pcall(function() return item:GetTrackTypeAndIndex() end)
+    if ok_ti and info and info[1] and info[2] then
+        track_type = tostring(info[1])
+        track_index = safe_number(info[2], 1)
+    end
+    local fps = timeline_fps()
+    local mp = item:GetMediaPoolItem()
+    local file_path = ""
+    if mp then
+        file_path = mp:GetClipProperty("File Path") or ""
+    end
+    if file_path == "" then
+        error("Clip '" .. tostring(item:GetName()) .. "' has no media file path and cannot be transcribed.")
+    end
+    local clip_id = string.format("%s:%d:%d:%d", track_type, track_index, start_f, source_start)
+    local clip = {
+        clip_id = clip_id,
+        name = item:GetName() or "",
+        track_type = track_type,
+        track_index = track_index,
+        timeline_start_frame = start_f,
+        timeline_end_frame = safe_number(item:GetEnd(), start_f),
+        source_start_frame = source_start,
+        source_end_frame = safe_number(item:GetSourceEndFrame(), source_start),
+        file_path = file_path,
+        fps = fps,
+        _item = item,
+        _mp = mp,
+    }
+    clips_by_id[clip_id] = clip
+    return {
+        clip_id = clip.clip_id,
+        name = clip.name,
+        track_type = clip.track_type,
+        track_index = clip.track_index,
+        timeline_start_frame = clip.timeline_start_frame,
+        timeline_end_frame = clip.timeline_end_frame,
+        source_start_frame = clip.source_start_frame,
+        source_end_frame = clip.source_end_frame,
+        file_path = clip.file_path,
+        fps = clip.fps,
+    }
+end
+
 local function jump_to_clip_second(clip_id, second_in_clip)
     local clip = clips_by_id[clip_id]
     if not clip then
@@ -498,6 +562,66 @@ local function assemble_append(clip_id, keep_ranges_frames, new_name)
     return true
 end
 
+local function replace_clip_in_place(clip_id, keep_ranges_frames)
+    local clip = clips_by_id[clip_id]
+    if not clip then
+        list_clips()
+        clip = clips_by_id[clip_id]
+    end
+    if not clip then
+        error("Unknown clip id " .. tostring(clip_id) .. ". Refresh the clip list.")
+    end
+    if not clip._item then
+        error("Clip '" .. tostring(clip.name) .. "' is not available on the current timeline.")
+    end
+    if not clip._mp then
+        error("Clip '" .. tostring(clip.name) .. "' has no media pool item; cannot replace.")
+    end
+    if not keep_ranges_frames or #keep_ranges_frames == 0 then
+        error("Nothing left to keep.")
+    end
+    local timeline = current_timeline()
+    local record_frame = safe_number(clip._item:GetStart(), clip.timeline_start_frame)
+    local track_index = clip.track_index
+    local media_type = 1
+    if clip.track_type == "audio" then
+        media_type = 2
+    end
+    if not timeline:DeleteClips({ clip._item }, true) then
+        error("Failed to delete clip '" .. tostring(clip.name) .. "' from the timeline.")
+    end
+    local media_pool = current_project():GetMediaPool()
+    local entries = {}
+    local rf = record_frame
+    for _, range in ipairs(keep_ranges_frames) do
+        local start_f = safe_number(range[1], 0)
+        local end_f = safe_number(range[2], 0)
+        local duration = math.max(0, end_f - start_f)
+        table.insert(entries, {
+            mediaPoolItem = clip._mp,
+            startFrame = start_f,
+            endFrame = end_f,
+            trackIndex = track_index,
+            recordFrame = rf,
+            mediaType = media_type,
+        })
+        rf = rf + duration
+    end
+    local i = 1
+    while i <= #entries do
+        local chunk = {}
+        for j = i, math.min(i + 49, #entries) do
+            table.insert(chunk, entries[j])
+        end
+        if not media_pool:AppendToTimeline(chunk) then
+            return false
+        end
+        i = i + 50
+    end
+    clips_by_id = {}
+    return true
+end
+
 local function dispatch(method, params)
     params = params or {}
     if method == "ping" then
@@ -508,12 +632,16 @@ local function dispatch(method, params)
         return timeline_fps()
     elseif method == "list_clips" then
         return list_clips()
+    elseif method == "clip_under_playhead" then
+        return clip_under_playhead()
     elseif method == "jump_to_clip_second" then
         return jump_to_clip_second(params.clip_id, safe_number(params.second_in_clip, 0))
     elseif method == "import_timeline_xml" then
         return import_timeline_xml(params.xml_path)
     elseif method == "assemble_append" then
         return assemble_append(params.clip_id, params.keep_ranges_frames, params.new_name)
+    elseif method == "replace_clip_in_place" then
+        return replace_clip_in_place(params.clip_id, params.keep_ranges_frames)
     else
         error("Unknown bridge method: " .. tostring(method))
     end

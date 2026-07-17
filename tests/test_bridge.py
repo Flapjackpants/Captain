@@ -31,6 +31,8 @@ class FakeHost:
         self.jumps: list[tuple[str, float]] = []
         self.imported: list[str] = []
         self.appended: list[tuple] = []
+        self.replaced: list[tuple] = []
+        self.playhead_clip = self.clips[0]
 
     def dispatch(self, method: str, params: dict):
         if method == "ping":
@@ -41,6 +43,8 @@ class FakeHost:
             return 24.0
         if method == "list_clips":
             return [c.to_dict() for c in self.clips]
+        if method == "clip_under_playhead":
+            return self.playhead_clip.to_dict()
         if method == "jump_to_clip_second":
             self.jumps.append((params["clip_id"], params["second_in_clip"]))
             return True
@@ -50,6 +54,11 @@ class FakeHost:
         if method == "assemble_append":
             self.appended.append(
                 (params["clip_id"], params["keep_ranges_frames"], params["new_name"])
+            )
+            return True
+        if method == "replace_clip_in_place":
+            self.replaced.append(
+                (params["clip_id"], params["keep_ranges_frames"])
             )
             return True
         raise ResolveError(f"unknown {method}")
@@ -111,7 +120,30 @@ def test_bridged_handler_methods(bridge_pair):
     assert handler.assemble_append(clips[0], [(0, 10), (20, 30)], "Cut") is True
     assert host.appended[0][0] == "video:1:0:0"
     assert host.appended[0][1] == [[0, 10], [20, 30]]
+    playhead = handler.clip_under_playhead()
+    assert playhead.clip_id == "video:1:0:0"
+    assert handler.replace_clip_in_place(clips[0], [(0, 10), (40, 50)]) is True
+    assert host.replaced[0] == ("video:1:0:0", [[0, 10], [40, 50]])
     handler.close()
+
+
+def test_clip_under_playhead_bridge(bridge_pair):
+    host, _server, client = bridge_pair
+    host.playhead_clip = ClipInfo(
+        clip_id="video:1:100:50",
+        name="Under",
+        track_type="video",
+        track_index=1,
+        timeline_start_frame=100,
+        timeline_end_frame=200,
+        source_start_frame=50,
+        source_end_frame=150,
+        file_path="/tmp/under.mov",
+        fps=24.0,
+    )
+    data = client.call("clip_under_playhead")
+    assert data["name"] == "Under"
+    assert data["timeline_start_frame"] == 100
 
 
 def test_method_error_propagates(bridge_pair):

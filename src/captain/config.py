@@ -20,6 +20,8 @@ DEFAULTS: dict[str, Any] = {
     "silence_max_pause": 0.25,     # silence retained at each trimmed junction
     "repeat_max_ngram": 8,
     "new_timeline_suffix": " [Captain]",
+    # "replace_in_place" | "new_timeline"
+    "apply_mode": "replace_in_place",
 }
 
 
