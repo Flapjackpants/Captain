@@ -1,7 +1,11 @@
 from xml.etree import ElementTree as ET
 
 from captain.api import ClipInfo
-from captain.assemble import build_fcp7_xml, seconds_to_source_frames
+from captain.assemble import (
+    build_fcp7_xml,
+    next_captain_timeline_name,
+    seconds_to_source_frames,
+)
 
 
 def make_clip(track_type="video", fps=24.0, src_start=100, src_end=2500):
@@ -79,3 +83,27 @@ def test_xml_ntsc_rate():
     rate = root.find("sequence/rate")
     assert rate.findtext("timebase") == "24"
     assert rate.findtext("ntsc") == "TRUE"
+
+
+def test_next_captain_timeline_name_first():
+    assert next_captain_timeline_name("Interview", []) == "Interview [Captain] 1"
+    assert (
+        next_captain_timeline_name("Interview", ["Episode 1", "Other [Captain] 9"])
+        == "Interview [Captain] 1"
+    )
+
+
+def test_next_captain_timeline_name_increments():
+    existing = [
+        "Interview [Captain] 1",
+        "Interview [Captain] 3",
+        "Interview [Captain] [Captain]",  # legacy stack — ignored
+    ]
+    assert next_captain_timeline_name("Interview", existing) == "Interview [Captain] 4"
+
+
+def test_next_captain_timeline_name_custom_suffix():
+    assert (
+        next_captain_timeline_name("A", ["A ·Cap· 2"], suffix=" ·Cap·")
+        == "A ·Cap· 3"
+    )

@@ -259,35 +259,115 @@ def find_silence_gaps(
     return cuts
 
 
-def find_repeats(transcript: Transcript, max_ngram: int = 8) -> list[list[int]]:
-    """Detect immediately repeated phrases (retakes / stutters).
+def find_repeats(
+    transcript: Transcript,
+    max_ngram: int = 8,
+    *,
+    min_ngram: int = 4,
+    min_pause: float = 0.35,
+) -> list[list[int]]:
+    """Detect abandoned takes: repeated phrases where the first copy should go.
 
-    Scans for n-grams (longest first) whose normalized text is immediately
-    repeated; suggests removing the *first* occurrence, since a re-take
-    usually means the speaker's later attempt is the good one. Returns
-    groups of word indices to remove.
+    Only matches n-grams of length ``min_ngram``..``max_ngram``. Skips
+    digit-only / non-lexical phrases (e.g. splitting ``5.5``). Requires a
+    pause between the two copies of at least ``min_pause`` seconds, unless
+    the phrase is long (n >= 6).
     """
-    norms = [_norm(w.text) for w in transcript.words]
+    words = transcript.words
+    norms = [_norm(w.text) for w in words]
     n_words = len(norms)
     suggested: list[list[int]] = []
     claimed: set[int] = set()
+    min_n = max(1, min_ngram)
+    max_n = max(min_n, max_ngram)
 
-    for n in range(max_ngram, 0, -1):
+    def _is_content_ngram(tokens: list[str]) -> bool:
+        if not tokens or not all(tokens):
+            return False
+        if all(t.isdigit() for t in tokens):
+            return False
+        return any(sum(c.isalpha() for c in t) >= 2 for t in tokens)
+
+    for n in range(max_n, min_n - 1, -1):
         i = 0
         while i + 2 * n <= n_words:
             first = norms[i : i + n]
             second = norms[i + n : i + 2 * n]
             span = set(range(i, i + 2 * n))
-            if first == second and all(t for t in first) and not (span & claimed):
-                group = list(range(i, i + n))
-                suggested.append(group)
-                claimed |= span
-                i += 2 * n
-            else:
-                i += 1
+            if (
+                first == second
+                and _is_content_ngram(first)
+                and not (span & claimed)
+            ):
+                gap = words[i + n].start - words[i + n - 1].end
+                if gap >= min_pause or n >= 6:
+                    group = list(range(i, i + n))
+                    suggested.append(group)
+                    claimed |= span
+                    i += 2 * n
+                    continue
+            i += 1
 
     suggested.sort(key=lambda g: g[0])
     return suggested
+
+
+@dataclass(frozen=True)
+class EditSnapshot:
+    order: tuple[int, ...]
+    removed: frozenset[int]
+    silence_cuts: tuple[tuple[float, float], ...]
+
+
+class EditHistory:
+    """Undo/redo stack of transcript edit snapshots."""
+
+    def __init__(self, max_depth: int = 50):
+        self.max_depth = max_depth
+        self._undo: list[EditSnapshot] = []
+        self._redo: list[EditSnapshot] = []
+
+    def clear(self) -> None:
+        self._undo.clear()
+        self._redo.clear()
+
+    def push(self, snapshot: EditSnapshot) -> None:
+        self._undo.append(snapshot)
+        if len(self._undo) > self.max_depth:
+            self._undo.pop(0)
+        self._redo.clear()
+
+    def can_undo(self) -> bool:
+        return bool(self._undo)
+
+    def can_redo(self) -> bool:
+        return bool(self._redo)
+
+    def undo(self, current: EditSnapshot) -> EditSnapshot | None:
+        if not self._undo:
+            return None
+        self._redo.append(current)
+        return self._undo.pop()
+
+    def redo(self, current: EditSnapshot) -> EditSnapshot | None:
+        if not self._redo:
+            return None
+        self._undo.append(current)
+        return self._redo.pop()
+
+
+def snapshot_transcript(transcript: Transcript) -> EditSnapshot:
+    return EditSnapshot(
+        order=tuple(transcript.order),
+        removed=frozenset(transcript.removed),
+        silence_cuts=tuple(tuple(c) for c in transcript.silence_cuts),
+    )
+
+
+def apply_snapshot(transcript: Transcript, snap: EditSnapshot) -> None:
+    transcript.order = list(snap.order)
+    transcript.removed = set(snap.removed)
+    transcript.silence_cuts = [tuple(c) for c in snap.silence_cuts]
 
 
 def media_sec_to_timeline_frame(

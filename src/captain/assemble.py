@@ -7,12 +7,33 @@ it as a new timeline. Fallback path (in api.py): AppendToTimeline.
 
 from __future__ import annotations
 
+import re
 import urllib.parse
 import urllib.request
 from xml.etree import ElementTree as ET
 from xml.dom import minidom
 
 from .api import ClipInfo
+
+
+def next_captain_timeline_name(
+    clip_name: str,
+    existing_names: list[str],
+    suffix: str = " [Captain]",
+) -> str:
+    """Return ``{clip_name}{suffix} {n}`` with n = 1 + max existing index.
+
+    Matches timelines named exactly ``{clip_name}{suffix} {digits}``.
+    """
+    pattern = re.compile(
+        "^" + re.escape(clip_name) + re.escape(suffix) + r" (\d+)$"
+    )
+    max_n = 0
+    for name in existing_names:
+        m = pattern.match(name)
+        if m:
+            max_n = max(max_n, int(m.group(1)))
+    return f"{clip_name}{suffix} {max_n + 1}"
 
 
 def seconds_to_source_frames(

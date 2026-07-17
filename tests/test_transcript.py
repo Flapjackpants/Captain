@@ -87,16 +87,30 @@ def test_silence_respects_max_pause():
     assert cut[1] == pytest.approx(tr.words[1].start - 0.25)
 
 
-def test_find_repeats_phrase():
-    tr = make_transcript(["so", "I", "went", "to", "I", "went", "to", "the", "store"])
-    groups = find_repeats(tr)
-    assert groups == [[1, 2, 3]]  # first take of "I went to" removed
+def test_find_repeats_phrase_with_pause():
+    # Four-word take repeated after a clear pause between copies.
+    texts = ["so", "I", "went", "home", "early", "I", "went", "home", "early", "then"]
+    words = []
+    t = 0.0
+    for i, text in enumerate(texts):
+        words.append(Word(index=i, text=text, start=t, end=t + 0.3))
+        if i == 4:
+            t += 0.3 + 0.5  # pause between takes
+        else:
+            t += 0.3 + 0.05
+    tr = Transcript(words=words, duration=t + 0.5)
+    groups = find_repeats(tr, min_ngram=4, max_ngram=8, min_pause=0.35)
+    assert groups == [[1, 2, 3, 4]]
 
 
-def test_find_repeats_single_word_stutter():
+def test_find_repeats_skips_single_word_stutter():
     tr = make_transcript(["the", "the", "cat"])
-    groups = find_repeats(tr)
-    assert groups == [[0]]
+    assert find_repeats(tr) == []
+
+
+def test_find_repeats_skips_digit_split():
+    tr = make_transcript(["5", "5", "percent"], gap=0.5)
+    assert find_repeats(tr, min_ngram=1, max_ngram=8, min_pause=0.35) == []
 
 
 def test_find_repeats_none():
@@ -104,10 +118,40 @@ def test_find_repeats_none():
     assert find_repeats(tr) == []
 
 
-def test_repeats_ignore_punctuation_case():
-    tr = make_transcript(["Hello,", "hello", "there"])
-    groups = find_repeats(tr)
-    assert groups == [[0]]
+def test_find_repeats_skips_short_echo():
+    tr = make_transcript(["Hello,", "hello", "there"], gap=0.5)
+    assert find_repeats(tr) == []
+
+
+def test_edit_history_undo_redo():
+    from captain.transcript import (
+        EditHistory,
+        apply_snapshot,
+        snapshot_transcript,
+    )
+
+    tr = make_transcript(["a", "b", "c", "d"])
+    hist = EditHistory()
+    hist.push(snapshot_transcript(tr))
+    tr.delete([1, 2])
+    assert tr.removed == {1, 2}
+
+    current = snapshot_transcript(tr)
+    snap = hist.undo(current)
+    assert snap is not None
+    apply_snapshot(tr, snap)
+    assert tr.removed == set()
+
+    current = snapshot_transcript(tr)
+    snap = hist.redo(current)
+    assert snap is not None
+    apply_snapshot(tr, snap)
+    assert tr.removed == {1, 2}
+
+    # New edit clears redo
+    hist.push(snapshot_transcript(tr))
+    tr.silence_cuts = [(0.1, 0.2)]
+    assert not hist.can_redo()
 
 
 def test_json_roundtrip():

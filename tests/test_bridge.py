@@ -39,6 +39,8 @@ class FakeHost:
             return {"ok": True, "version": "19.1 Free", "mode": "injected"}
         if method == "timeline_name":
             return "Episode 1"
+        if method == "list_timeline_names":
+            return ["Episode 1", "Interview [Captain] 1"]
         if method == "timeline_fps":
             return 24.0
         if method == "list_clips":
@@ -115,6 +117,7 @@ def test_bridged_handler_methods(bridge_pair):
     handler = BridgedResolveHandler(BridgeClient.from_url(server.url, server.token))
     handler.connect()
     assert handler.timeline_name() == "Episode 1"
+    assert handler.list_timeline_names() == ["Episode 1", "Interview [Captain] 1"]
     clips = handler.list_clips()
     assert clips[0].clip_id == "video:1:0:0"
     handler.jump_to_clip_second(clips[0], 1.5)

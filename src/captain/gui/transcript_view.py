@@ -19,10 +19,13 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QKeySequence, QPainter, Q
 from PySide6.QtWidgets import QListView, QStyle, QStyledItemDelegate
 
 from ..transcript import (
+    EditHistory,
     Transcript,
     TranscriptLine,
+    apply_snapshot,
     frame_to_timecode,
     media_sec_to_timeline_frame,
+    snapshot_transcript,
 )
 
 WORD_ROLE = Qt.ItemDataRole.UserRole + 1  # -> (word_index, removed: bool)
@@ -241,12 +244,14 @@ class TranscriptView(QListView):
         self.doubleClicked.connect(self._on_activate)
         self.clicked.connect(self._on_click)
         self._clipboard_words: list[int] = []
+        self._history = EditHistory()
 
     @property
     def transcript(self) -> Transcript | None:
         return self._model.transcript
 
     def set_transcript(self, transcript: Transcript | None) -> None:
+        self._history.clear()
         self._model.set_transcript(transcript)
 
     def set_timeline_context(self, timeline_start_frame: int, fps: float) -> None:
@@ -290,23 +295,46 @@ class TranscriptView(QListView):
                 out.append(widx)
         return out
 
+    def push_history(self) -> None:
+        if self.transcript is not None:
+            self._history.push(snapshot_transcript(self.transcript))
+
+    def undo(self) -> bool:
+        if self.transcript is None or not self._history.can_undo():
+            return False
+        current = snapshot_transcript(self.transcript)
+        snap = self._history.undo(current)
+        if snap is None:
+            return False
+        apply_snapshot(self.transcript, snap)
+        self._model.set_transcript(self.transcript)
+        self.edited.emit()
+        return True
+
+    def redo(self) -> bool:
+        if self.transcript is None or not self._history.can_redo():
+            return False
+        current = snapshot_transcript(self.transcript)
+        snap = self._history.redo(current)
+        if snap is None:
+            return False
+        apply_snapshot(self.transcript, snap)
+        self._model.set_transcript(self.transcript)
+        self.edited.emit()
+        return True
+
     def delete_selection(self) -> None:
         indices = self._selected_word_indices()
         if indices and self.transcript:
+            self.push_history()
             self.transcript.delete(indices)
-            self._model.refresh()
-            self.edited.emit()
-
-    def restore_selection(self) -> None:
-        indices = self._selected_word_indices()
-        if indices and self.transcript:
-            self.transcript.restore(indices)
             self._model.refresh()
             self.edited.emit()
 
     def cut_selection(self) -> None:
         indices = self._selected_word_indices()
         if indices and self.transcript:
+            self.push_history()
             self._clipboard_words = indices
             self.transcript.delete(indices)
             self._model.refresh()
@@ -315,8 +343,8 @@ class TranscriptView(QListView):
     def paste_at_current(self) -> None:
         if not self._clipboard_words or self.transcript is None:
             return
+        self.push_history()
         current = self.currentIndex()
-        # Map current model row to order position among word rows only.
         if current.isValid():
             kind = self._model.data(current, KIND_ROLE)
             widx = self._model.word_index(current.row())
@@ -346,8 +374,6 @@ class TranscriptView(QListView):
             self.cut_selection()
         elif event.matches(QKeySequence.StandardKey.Paste):
             self.paste_at_current()
-        elif event.matches(QKeySequence.StandardKey.Undo):
-            self.restore_selection()
         else:
             super().keyPressEvent(event)
 

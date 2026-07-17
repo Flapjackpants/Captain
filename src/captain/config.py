@@ -18,7 +18,9 @@ DEFAULTS: dict[str, Any] = {
     "language": None,  # autodetect
     "silence_min_duration": 0.8,   # gaps >= this are considered trimmable silence
     "silence_max_pause": 0.25,     # silence retained at each trimmed junction
+    "repeat_min_ngram": 4,         # shortest phrase treated as a retake
     "repeat_max_ngram": 8,
+    "repeat_min_pause": 0.35,      # pause between copies to count as a retake
     "new_timeline_suffix": " [Captain]",
     # "replace_in_place" (non-ripple) | "replace_ripple" | "new_timeline"
     "apply_mode": "replace_in_place",

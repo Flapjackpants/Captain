@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 
 from .. import config
 from ..api import ClipInfo, ResolveError, create_resolve_handler
-from ..assemble import build_fcp7_xml, seconds_to_source_frames
+from ..assemble import build_fcp7_xml, next_captain_timeline_name, seconds_to_source_frames
 from ..engine import Transcriber, extract_audio
 from ..transcript import Transcript, find_repeats, find_silence_gaps
 from .transcript_view import TranscriptView
@@ -128,6 +128,7 @@ class MainWindow(QMainWindow):
 
         search_row = QHBoxLayout()
         search_row.setSpacing(8)
+        search_row.setContentsMargins(0, 0, 0, 0)
         search_row.addWidget(QLabel("Search"))
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Find words in the transcript…")
@@ -145,11 +146,17 @@ class MainWindow(QMainWindow):
         search_row.addWidget(self.search_prev_btn)
         search_row.addWidget(self.search_next_btn)
         search_row.addWidget(self.search_count)
-        layout.addLayout(search_row)
+        self._search_bar = QWidget()
+        self._search_bar.setLayout(search_row)
+        self._search_bar.setVisible(False)
+        layout.addWidget(self._search_bar)
 
         QShortcut(QKeySequence("Ctrl+G"), self, self._find_next)
         QShortcut(QKeySequence("Ctrl+Shift+G"), self, self._find_prev)
-        QShortcut(QKeySequence("Ctrl+F"), self, lambda: self.search_edit.setFocus())
+        QShortcut(QKeySequence.StandardKey.Find, self, self._show_search)
+        QShortcut(QKeySequence(Qt.Key.Key_Escape), self, self._hide_search)
+        QShortcut(QKeySequence.StandardKey.Undo, self, self._undo)
+        QShortcut(QKeySequence.StandardKey.Redo, self, self._redo)
 
         self.view = TranscriptView()
         self.view.setObjectName("transcript")
@@ -159,9 +166,9 @@ class MainWindow(QMainWindow):
 
         hint = QLabel(
             "Select words, then: Delete removes • Cmd/Ctrl+X cuts • "
-            "Cmd/Ctrl+V pastes after the current word • Cmd/Ctrl+Z restores "
-            "selection • double-click a word (or click a line timecode) jumps "
-            "the Resolve playhead • Cmd/Ctrl+F search"
+            "Cmd/Ctrl+V pastes • Cmd/Ctrl+Z undo • Cmd/Ctrl+Shift+Z redo • "
+            "double-click a word (or click a line timecode) jumps the Resolve "
+            "playhead • Cmd/Ctrl+F search"
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -415,7 +422,8 @@ class MainWindow(QMainWindow):
             self.view.set_timeline_context(clip.timeline_start_frame, clip.fps)
         self.view.set_transcript(transcript)
         self._set_editing_enabled(True)
-        self._on_search_text(self.search_edit.text())
+        if self._search_bar.isVisible():
+            self._on_search_text(self.search_edit.text())
         self._status(
             f"{len(transcript.words)} words • {transcript.duration:.1f}s • "
             "edit, then Apply"
@@ -432,9 +440,26 @@ class MainWindow(QMainWindow):
         self._save_session(transcript)
         kept = len([i for i in transcript.order if i not in transcript.removed])
         self._status(f"{kept}/{len(transcript.words)} words kept")
-        self._on_search_text(self.search_edit.text())
+        if self._search_bar.isVisible():
+            self._on_search_text(self.search_edit.text())
 
     # ---- search -------------------------------------------------------------
+
+    def _show_search(self) -> None:
+        self._search_bar.setVisible(True)
+        self.search_edit.setFocus()
+        self.search_edit.selectAll()
+
+    def _hide_search(self) -> None:
+        if not self._search_bar.isVisible():
+            return
+        self.search_edit.clear()
+        self.view.clear_search_matches()
+        self._search_matches = []
+        self._search_pos = -1
+        self.search_count.setText("")
+        self._search_bar.setVisible(False)
+        self.view.setFocus()
 
     def _on_search_text(self, text: str) -> None:
         transcript = self.view.transcript
@@ -453,12 +478,16 @@ class MainWindow(QMainWindow):
             self._find_next()
 
     def _find_next(self) -> None:
+        if not self._search_bar.isVisible():
+            return
         if not self._search_matches:
             return
         self._search_pos = (self._search_pos + 1) % len(self._search_matches)
         self._activate_search_hit()
 
     def _find_prev(self) -> None:
+        if not self._search_bar.isVisible():
+            return
         if not self._search_matches:
             return
         self._search_pos = (self._search_pos - 1) % len(self._search_matches)
@@ -474,12 +503,21 @@ class MainWindow(QMainWindow):
         )
         self._jump_to_word(widx)
 
+    def _undo(self) -> None:
+        if self.view.undo():
+            self._status("Undid last edit")
+
+    def _redo(self) -> None:
+        if self.view.redo():
+            self._status("Redid last edit")
+
     # ---- auto-trim -----------------------------------------------------------
 
     def _trim_silence(self) -> None:
         transcript = self.view.transcript
         if transcript is None:
             return
+        self.view.push_history()
         cuts = find_silence_gaps(
             transcript,
             min_duration=self.cfg["silence_min_duration"],
@@ -494,16 +532,25 @@ class MainWindow(QMainWindow):
         transcript = self.view.transcript
         if transcript is None:
             return
-        groups = find_repeats(transcript, max_ngram=self.cfg["repeat_max_ngram"])
+        groups = find_repeats(
+            transcript,
+            max_ngram=self.cfg["repeat_max_ngram"],
+            min_ngram=self.cfg.get("repeat_min_ngram", 4),
+            min_pause=self.cfg.get("repeat_min_pause", 0.35),
+        )
+        if not groups:
+            self._status("No retakes found")
+            return
+        self.view.push_history()
         count = 0
         for group in groups:
             transcript.delete(group)
             count += len(group)
         self.view.refresh()
         self._save_session(transcript)
-        self._status(f"Removed {count} repeated words in {len(groups)} phrases")
-        self._on_search_text(self.search_edit.text())
-
+        self._status(f"Removed {count} words in {len(groups)} abandoned take(s)")
+        if self._search_bar.isVisible():
+            self._on_search_text(self.search_edit.text())
     # ---- playhead sync ---------------------------------------------------------
 
     def _jump_to_word(self, word_index: int) -> None:
@@ -587,7 +634,12 @@ class MainWindow(QMainWindow):
     def _apply_new_timeline(
         self, clip: ClipInfo, frames: list[tuple[int, int]]
     ) -> None:
-        new_name = f"{self.resolve.timeline_name()}{self.cfg['new_timeline_suffix']}"
+        suffix = self.cfg.get("new_timeline_suffix", " [Captain]")
+        try:
+            existing = self.resolve.list_timeline_names()
+        except Exception:
+            existing = []
+        new_name = next_captain_timeline_name(clip.name, existing, suffix=suffix)
         try:
             xml = build_fcp7_xml(clip, frames, new_name)
             xml_path = Path(tempfile.mkdtemp(prefix="captain_")) / "captain.xml"

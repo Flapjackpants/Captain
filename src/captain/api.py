@@ -206,6 +206,27 @@ class ResolveHandler:
     def timeline_name(self) -> str:
         return self._timeline().GetName()
 
+    def list_timeline_names(self) -> list[str]:
+        """Names of all timelines in the current project."""
+        project = self._project()
+        names: list[str] = []
+        try:
+            count = int(project.GetTimelineCount() or 0)
+        except Exception:
+            count = 0
+        for i in range(1, count + 1):
+            try:
+                timeline = project.GetTimelineByIndex(i)
+            except Exception:
+                timeline = None
+            if timeline is None:
+                continue
+            try:
+                names.append(str(timeline.GetName()))
+            except Exception:
+                pass
+        return names
+
     def timeline_fps(self) -> float:
         timeline = self._timeline()
         fps = timeline.GetSetting("timelineFrameRate")
@@ -492,6 +513,8 @@ class ResolveHandler:
             return {"ok": True, "version": self.version_string(), "mode": self.mode}
         if method == "timeline_name":
             return self.timeline_name()
+        if method == "list_timeline_names":
+            return self.list_timeline_names()
         if method == "timeline_fps":
             return self.timeline_fps()
         if method == "list_clips":
@@ -551,6 +574,9 @@ class BridgedResolveHandler:
 
     def timeline_name(self) -> str:
         return self._client.call("timeline_name")
+
+    def list_timeline_names(self) -> list[str]:
+        return list(self._client.call("list_timeline_names") or [])
 
     def timeline_fps(self) -> float:
         return float(self._client.call("timeline_fps"))

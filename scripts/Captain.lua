@@ -690,12 +690,27 @@ local function replace_clip_in_place(clip_id, keep_ranges_frames, ripple)
     return true
 end
 
+local function list_timeline_names()
+    local project = current_project()
+    local names = {}
+    local count = safe_number(project:GetTimelineCount(), 0)
+    for i = 1, count do
+        local timeline = project:GetTimelineByIndex(i)
+        if timeline then
+            table.insert(names, timeline:GetName() or "")
+        end
+    end
+    return names
+end
+
 local function dispatch(method, params)
     params = params or {}
     if method == "ping" then
         return { ok = true, version = version_string(), mode = "lua-file" }
     elseif method == "timeline_name" then
         return current_timeline():GetName()
+    elseif method == "list_timeline_names" then
+        return list_timeline_names()
     elseif method == "timeline_fps" then
         return timeline_fps()
     elseif method == "list_clips" then
