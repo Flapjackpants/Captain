@@ -6,6 +6,7 @@ import sys
 
 
 def main() -> int:
+    from PySide6.QtGui import QCursor, QGuiApplication
     from PySide6.QtWidgets import QApplication
 
     from . import config
@@ -17,6 +18,10 @@ def main() -> int:
     app.setApplicationName("Captain")
     apply_theme(app)
     window = MainWindow()
+    screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+    if screen is not None:
+        geo = screen.availableGeometry()
+        window.setGeometry(geo.x(), geo.y(), geo.width(), geo.height() // 2)
     window.show()
     return app.exec()
 

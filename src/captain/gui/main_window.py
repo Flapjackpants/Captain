@@ -71,7 +71,6 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Captain")
-        self.resize(960, 680)
 
         self.cfg = config.load_config()
         self.resolve = create_resolve_handler()
