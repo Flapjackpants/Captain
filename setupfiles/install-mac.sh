@@ -1,7 +1,7 @@
 #!/bin/bash
 # Captain installer for macOS.
-# Creates a virtualenv, installs dependencies, and registers a single Scripts
-# menu entry (Captain.lua) — same pattern BadWords uses.
+# Creates a virtualenv, installs dependencies, and registers a Scripts menu
+# entry (Captain.lua) so you can launch from Workspace → Scripts → Captain.
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,7 +24,7 @@ if [ -z "$PYTHON" ]; then
     echo "ERROR: No python3 found. Install Python 3.11+ (e.g. brew install python@3.12)."
     exit 1
 fi
-echo "Using Python for Captain app: $PYTHON ($($PYTHON --version))"
+echo "Using Python: $PYTHON ($($PYTHON --version))"
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
     echo "WARNING: ffmpeg not found on PATH. Install it with: brew install ffmpeg"
@@ -71,6 +71,4 @@ echo "  1. Fully quit and reopen DaVinci Resolve"
 echo "  2. Open a project"
 echo "  3. Workspace → Scripts → Captain"
 echo
-echo "Same launch path as BadWords: installer registers the Scripts menu wrapper;"
-echo "Resolve has no lower-friction Free plugin API than that."
 echo "(First transcription downloads the Whisper model; later runs are fast.)"

@@ -154,6 +154,23 @@ def test_edit_history_undo_redo():
     assert not hist.can_redo()
 
 
+def test_silence_cut_restore_by_removing_cut():
+    tr = make_transcript(["a", "b"], gap=2.0)
+    cuts = find_silence_gaps(tr, min_duration=1.0, max_pause=0.25)
+    assert cuts
+    tr.silence_cuts = list(cuts)
+    # Simulate deleting one silence marker: drop that cut.
+    drop = cuts[0]
+    tr.silence_cuts = [c for c in tr.silence_cuts if c != drop]
+    assert drop not in tr.silence_cuts
+    # keep_ranges should include more time than with the cut present
+    tr.silence_cuts = list(cuts)
+    with_cuts = sum(e - s for s, e in tr.keep_ranges())
+    tr.silence_cuts = []
+    without = sum(e - s for s, e in tr.keep_ranges())
+    assert without > with_cuts
+
+
 def test_json_roundtrip():
     tr = make_transcript(["a", "b", "c"])
     tr.delete([1])

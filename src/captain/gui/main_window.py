@@ -13,6 +13,7 @@ from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -162,13 +163,14 @@ class MainWindow(QMainWindow):
         self.view.setObjectName("transcript")
         self.view.edited.connect(self._on_edited)
         self.view.word_activated.connect(self._jump_to_word)
+        self.view.time_activated.connect(self._jump_to_media_second)
         layout.addWidget(self.view, stretch=1)
 
         hint = QLabel(
             "Select words, then: Delete removes • Cmd/Ctrl+X cuts • "
             "Cmd/Ctrl+V pastes • Cmd/Ctrl+Z undo • Cmd/Ctrl+Shift+Z redo • "
-            "double-click a word (or click a line timecode) jumps the Resolve "
-            "playhead • Cmd/Ctrl+F search"
+            "click a word/timecode jumps the playhead • Trim Silence shows "
+            "··· markers (Delete a marker to keep that silence) • Cmd/Ctrl+F search"
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -524,9 +526,13 @@ class MainWindow(QMainWindow):
             max_pause=self.cfg["silence_max_pause"],
         )
         transcript.silence_cuts = cuts
+        self.view.refresh()
         self._save_session(transcript)
         total = sum(e - s for s, e in cuts)
-        self._status(f"Marked {len(cuts)} silence gaps ({total:.1f}s) for removal")
+        self._status(
+            f"Marked {len(cuts)} silence gaps ({total:.1f}s) — "
+            "Delete a ··· marker to keep that silence"
+        )
 
     def _trim_repeats(self) -> None:
         transcript = self.view.transcript
@@ -558,9 +564,14 @@ class MainWindow(QMainWindow):
         if transcript is None or self.current_clip is None:
             return
         word = transcript.words[word_index]
+        self._jump_to_media_second(word.start)
+
+    def _jump_to_media_second(self, media_sec: float) -> None:
+        if self.current_clip is None:
+            return
         try:
             self.resolve.jump_to_clip_second(
-                self.current_clip, self.current_clip.source_start_sec + word.start
+                self.current_clip, self.current_clip.source_start_sec + media_sec
             )
         except ResolveError as e:
             self._status(str(e))
@@ -639,7 +650,19 @@ class MainWindow(QMainWindow):
             existing = self.resolve.list_timeline_names()
         except Exception:
             existing = []
-        new_name = next_captain_timeline_name(clip.name, existing, suffix=suffix)
+        default_name = next_captain_timeline_name(clip.name, existing, suffix=suffix)
+        new_name, ok_name = QInputDialog.getText(
+            self,
+            "Captain",
+            "Name for the new timeline:",
+            text=default_name,
+        )
+        if not ok_name:
+            return
+        new_name = new_name.strip()
+        if not new_name:
+            QMessageBox.information(self, "Captain", "Timeline name cannot be empty.")
+            return
         try:
             xml = build_fcp7_xml(clip, frames, new_name)
             xml_path = Path(tempfile.mkdtemp(prefix="captain_")) / "captain.xml"

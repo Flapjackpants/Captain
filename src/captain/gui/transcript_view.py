@@ -1,9 +1,9 @@
 """Line-aware transcript editor widget.
 
 Words render as a wrapping flow grouped into lines. Each line starts with a
-timeline-timecode gutter. Selection, Delete/Backspace to remove, Ctrl+X /
-Ctrl+V to cut/paste, double-click (or line-timecode click) to jump the
-Resolve playhead. Search highlights matching words.
+timeline-timecode gutter. Trimmed silence gaps appear as dim markers you can
+delete to restore. Selection, Delete/Backspace, cut/paste, single-click to
+jump the Resolve playhead. Search highlights matching words.
 """
 
 from __future__ import annotations
@@ -29,18 +29,34 @@ from ..transcript import (
 )
 
 WORD_ROLE = Qt.ItemDataRole.UserRole + 1  # -> (word_index, removed: bool)
-KIND_ROLE = Qt.ItemDataRole.UserRole + 2  # "line" | "word"
+KIND_ROLE = Qt.ItemDataRole.UserRole + 2  # "line" | "word" | "silence"
 LINE_ROLE = Qt.ItemDataRole.UserRole + 3  # TranscriptLine
 MATCH_ROLE = Qt.ItemDataRole.UserRole + 4  # bool
+SILENCE_ROLE = Qt.ItemDataRole.UserRole + 5  # (start, end) seconds
+
+
+def _cuts_in_gap(
+    cuts: list[tuple[float, float]], gap_start: float, gap_end: float
+) -> list[tuple[float, float]]:
+    """Return silence cuts that fall primarily in [gap_start, gap_end]."""
+    out: list[tuple[float, float]] = []
+    for cs, ce in cuts:
+        if ce <= gap_start or cs >= gap_end:
+            continue
+        # Prefer cuts whose midpoint sits in the gap (avoids double-insert).
+        mid = (cs + ce) / 2.0
+        if gap_start - 1e-6 <= mid <= gap_end + 1e-6:
+            out.append((cs, ce))
+    return out
 
 
 class TranscriptModel(QAbstractListModel):
-    """Flat model: line-header rows interleaved with word rows."""
+    """Flat model: line headers, words, and silence-cut markers."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.transcript: Transcript | None = None
-        self._rows: list[tuple[str, int | TranscriptLine]] = []
+        self._rows: list[tuple[str, object]] = []
         self._match_words: set[int] = set()
         self._timeline_start_frame: int = 0
         self._fps: float = 24.0
@@ -84,14 +100,39 @@ class TranscriptModel(QAbstractListModel):
         self._rebuild_rows()
         self.endResetModel()
 
+    def _append_silence_in_gap(self, gap_start: float, gap_end: float) -> None:
+        assert self.transcript is not None
+        for cut in _cuts_in_gap(self.transcript.silence_cuts, gap_start, gap_end):
+            self._rows.append(("silence", cut))
+
     def _rebuild_rows(self) -> None:
         self._rows = []
         if self.transcript is None:
             return
-        for line in self.transcript.lines():
-            self._rows.append(("line", line))
-            for widx in line.word_indices:
-                self._rows.append(("word", widx))
+        tr = self.transcript
+        order = tr.order
+        if not order:
+            for cut in sorted(tr.silence_cuts):
+                self._rows.append(("silence", cut))
+            return
+
+        line_starts = {line.word_indices[0] for line in tr.lines() if line.word_indices}
+        self._append_silence_in_gap(0.0, tr.words[order[0]].start)
+
+        for i, widx in enumerate(order):
+            if widx in line_starts:
+                for line in tr.lines():
+                    if line.word_indices and line.word_indices[0] == widx:
+                        self._rows.append(("line", line))
+                        break
+            if i > 0:
+                prev = tr.words[order[i - 1]]
+                cur = tr.words[widx]
+                self._append_silence_in_gap(prev.end, cur.start)
+            self._rows.append(("word", widx))
+
+        last = tr.words[order[-1]]
+        self._append_silence_in_gap(last.end, tr.duration)
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return len(self._rows)
@@ -102,8 +143,33 @@ class TranscriptModel(QAbstractListModel):
         kind, payload = self._rows[row]
         if kind == "word":
             return int(payload)  # type: ignore[arg-type]
-        line: TranscriptLine = payload  # type: ignore[assignment]
-        return line.start_word
+        if kind == "line":
+            line: TranscriptLine = payload  # type: ignore[assignment]
+            return line.start_word
+        return None
+
+    def silence_range(self, row: int) -> tuple[float, float] | None:
+        if row < 0 or row >= len(self._rows):
+            return None
+        kind, payload = self._rows[row]
+        if kind == "silence":
+            cs, ce = payload  # type: ignore[misc]
+            return float(cs), float(ce)
+        return None
+
+    def media_second_at_row(self, row: int) -> float | None:
+        if self.transcript is None or row < 0 or row >= len(self._rows):
+            return None
+        kind, payload = self._rows[row]
+        if kind == "word":
+            return self.transcript.words[int(payload)].start  # type: ignore[arg-type]
+        if kind == "line":
+            line: TranscriptLine = payload  # type: ignore[assignment]
+            return line.start
+        if kind == "silence":
+            cs, _ce = payload  # type: ignore[misc]
+            return float(cs)
+        return None
 
     def row_for_word(self, word_index: int) -> int:
         for i, (kind, payload) in enumerate(self._rows):
@@ -130,6 +196,21 @@ class TranscriptModel(QAbstractListModel):
                 return f"Jump to {self.data(index, Qt.ItemDataRole.DisplayRole)}"
             if role == Qt.ItemDataRole.SizeHintRole:
                 return QSize(self._viewport_width - 8, 22)
+            return None
+
+        if kind == "silence":
+            cs, ce = payload  # type: ignore[misc]
+            dur = max(0.0, float(ce) - float(cs))
+            if role == SILENCE_ROLE:
+                return (float(cs), float(ce))
+            if role == Qt.ItemDataRole.DisplayRole:
+                # Visual “space” for a trimmed gap; duration in tooltip.
+                return "  ···  "
+            if role == Qt.ItemDataRole.ToolTipRole:
+                return (
+                    f"Silence {dur:.1f}s (will be trimmed). "
+                    "Delete to keep this silence."
+                )
             return None
 
         widx = int(payload)  # type: ignore[arg-type]
@@ -186,13 +267,28 @@ class WordDelegate(QStyledItemDelegate):
                 painter.fillRect(rect, option.palette.highlight())
                 color = option.palette.highlightedText().color()
             else:
-                color = QColor(135, 135, 143)  # TEXT_DIM
+                color = QColor(135, 135, 143)
             painter.setPen(QPen(color))
             painter.drawText(
                 rect.adjusted(4, 0, -4, 0),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 text,
             )
+            painter.restore()
+            return
+
+        if kind == "silence":
+            painter.setFont(self.font)
+            text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+            if option.state & QStyle.StateFlag.State_Selected:
+                painter.fillRect(rect, option.palette.highlight())
+                color = option.palette.highlightedText().color()
+            else:
+                painter.fillRect(rect, QColor(60, 60, 70, 80))
+                color = QColor(135, 135, 143)
+            painter.setPen(QPen(color))
+            text_rect = rect.adjusted(self.PAD_X, self.PAD_Y, -self.PAD_X, -self.PAD_Y)
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, text)
             painter.restore()
             return
 
@@ -229,6 +325,8 @@ class WordDelegate(QStyledItemDelegate):
 class TranscriptView(QListView):
     edited = Signal()
     word_activated = Signal(int)
+    # Media-relative seconds (from clip analysis start) to seek in Resolve.
+    time_activated = Signal(float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -241,7 +339,6 @@ class TranscriptView(QListView):
         self.setSelectionMode(QListView.SelectionMode.ExtendedSelection)
         self.setSpacing(2)
         self.setUniformItemSizes(False)
-        self.doubleClicked.connect(self._on_activate)
         self.clicked.connect(self._on_click)
         self._clipboard_words: list[int] = []
         self._history = EditHistory()
@@ -295,6 +392,15 @@ class TranscriptView(QListView):
                 out.append(widx)
         return out
 
+    def _selected_silence_cuts(self) -> list[tuple[float, float]]:
+        rows = sorted(i.row() for i in self.selectionModel().selectedIndexes())
+        out: list[tuple[float, float]] = []
+        for r in rows:
+            cut = self._model.silence_range(r)
+            if cut is not None:
+                out.append(cut)
+        return out
+
     def push_history(self) -> None:
         if self.transcript is not None:
             self._history.push(snapshot_transcript(self.transcript))
@@ -324,12 +430,24 @@ class TranscriptView(QListView):
         return True
 
     def delete_selection(self) -> None:
-        indices = self._selected_word_indices()
-        if indices and self.transcript:
-            self.push_history()
-            self.transcript.delete(indices)
-            self._model.refresh()
-            self.edited.emit()
+        if self.transcript is None:
+            return
+        words = self._selected_word_indices()
+        silences = self._selected_silence_cuts()
+        if not words and not silences:
+            return
+        self.push_history()
+        if words:
+            self.transcript.delete(words)
+        if silences:
+            # Deleting a silence marker restores that gap (removes the cut).
+            remove_keys = {(round(s, 4), round(e, 4)) for s, e in silences}
+            self.transcript.silence_cuts = [
+                c for c in self.transcript.silence_cuts
+                if (round(c[0], 4), round(c[1], 4)) not in remove_keys
+            ]
+        self._model.refresh()
+        self.edited.emit()
 
     def cut_selection(self) -> None:
         indices = self._selected_word_indices()
@@ -377,13 +495,17 @@ class TranscriptView(QListView):
         else:
             super().keyPressEvent(event)
 
-    def _on_activate(self, index: QModelIndex) -> None:
-        widx = self._model.word_index(index.row())
-        if widx is not None:
-            self.word_activated.emit(widx)
-
     def _on_click(self, index: QModelIndex) -> None:
-        if self._model.data(index, KIND_ROLE) == "line":
+        kind = self._model.data(index, KIND_ROLE)
+        if kind == "word":
             widx = self._model.word_index(index.row())
             if widx is not None:
                 self.word_activated.emit(widx)
+            return
+        sec = self._model.media_second_at_row(index.row())
+        if sec is not None:
+            self.time_activated.emit(sec)
+            if kind == "line":
+                widx = self._model.word_index(index.row())
+                if widx is not None:
+                    self.word_activated.emit(widx)
