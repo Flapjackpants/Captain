@@ -5,41 +5,17 @@ Holds live `resolve`, serves a file-based JSON bridge, launches the Captain UI.
 Does not require bmd.parseJSON (uses a pure-Lua JSON codec).
 ]]
 
--- #region agent log
-local DEBUG_LOG = "/Users/maxwellli/Documents/programming/captain/.cursor/debug-ae4778.log"
-local function agent_log(hypothesis_id, location, message, data)
-    local parts = {
-        string.format('"sessionId":"ae4778"'),
-        string.format('"runId":"%s"', tostring(data and data.runId or "pre-fix")),
-        string.format('"hypothesisId":"%s"', tostring(hypothesis_id)),
-        string.format('"location":"%s"', tostring(location)),
-        string.format('"message":"%s"', tostring(message):gsub('"', '\\"')),
-        string.format('"timestamp":%d', math.floor((os.time() or 0) * 1000)),
-    }
-    if data then
-        local dparts = {}
-        for k, v in pairs(data) do
-            if k ~= "runId" then
-                local vv = tostring(v):gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\n", " ")
-                table.insert(dparts, string.format('"%s":"%s"', tostring(k), vv))
-            end
-        end
-        table.insert(parts, '"data":{' .. table.concat(dparts, ",") .. "}")
-    end
-    local line = "{" .. table.concat(parts, ",") .. "}\n"
-    local f = io.open(DEBUG_LOG, "a")
+-- Lightweight log for support/debugging:
+-- ~/Library/Application Support/Captain/resolve-script.log
+local function script_log(message)
+    local path = (os.getenv("HOME") or "")
+        .. "/Library/Application Support/Captain/resolve-script.log"
+    local f = io.open(path, "a")
     if f then
-        f:write(line)
+        f:write(os.date("%Y-%m-%d %H:%M:%S") .. " " .. tostring(message) .. "\n")
         f:close()
     end
-    local status_path = (os.getenv("HOME") or "") .. "/Library/Application Support/Captain/last-run.txt"
-    local sf = io.open(status_path, "a")
-    if sf then
-        sf:write(os.date("%Y-%m-%d %H:%M:%S") .. " " .. tostring(message) .. "\n")
-        sf:close()
-    end
 end
--- #endregion
 
 -- ---- pure Lua JSON (no bmd.parseJSON required) -----------------------------
 
@@ -245,14 +221,8 @@ end
 -- Prefer bmd helpers when present; otherwise pure Lua.
 local function decode_json(s)
     if bmd and bmd.parseJSON then
-        -- #region agent log
-        agent_log("H1", "Captain.lua:decode_json", "using bmd.parseJSON", { path = "bmd" })
-        -- #endregion
         return bmd.parseJSON(s)
     end
-    -- #region agent log
-    agent_log("H1", "Captain.lua:decode_json", "using pure Lua JSON", { path = "pure" })
-    -- #endregion
     return json_decode(s)
 end
 
@@ -551,14 +521,7 @@ end
 
 -- ---- main ------------------------------------------------------------------
 
--- #region agent log
-agent_log("H4", "Captain.lua:main", "script entered", {
-    has_resolve = tostring(resolve ~= nil),
-    has_bmd_parse = tostring(bmd ~= nil and bmd.parseJSON ~= nil),
-    has_bmd_encode = tostring(bmd ~= nil and bmd.encodeJSON ~= nil),
-    runId = "post-fix",
-})
--- #endregion
+script_log("Captain script started (resolve=" .. tostring(resolve ~= nil) .. ")")
 
 local ok_main, err_main = pcall(function()
     if not resolve then
@@ -575,13 +538,6 @@ local ok_main, err_main = pcall(function()
     local install = load_install()
     local python = install.python
     local app_dir = install.app_dir
-    -- #region agent log
-    agent_log("H4", "Captain.lua:main", "install loaded", {
-        python = tostring(python),
-        app_dir = tostring(app_dir),
-        runId = "post-fix",
-    })
-    -- #endregion
     if not python or not app_dir then
         error("install.json is missing python/app_dir")
     end
@@ -617,9 +573,7 @@ local ok_main, err_main = pcall(function()
         handle:close()
     end
     pid = (pid or ""):gsub("%s+", "")
-    -- #region agent log
-    agent_log("H4", "Captain.lua:main", "UI spawn attempted", { pid = tostring(pid), ui_log = ui_log })
-    -- #endregion
+    script_log("UI spawned pid=" .. tostring(pid))
     if pid == "" then
         error("Failed to launch Captain UI. See " .. ui_log)
     end
@@ -637,9 +591,6 @@ local ok_main, err_main = pcall(function()
             local req_id = req.id
             local method = req.method
             local params = req.params or {}
-            -- #region agent log
-            agent_log("H5", "Captain.lua:bridge", "request", { method = tostring(method), id = tostring(req_id), runId = "post-fix" })
-            -- #endregion
             local response
             local ok, result_or_err = pcall(function()
                 if method == "auth" then
@@ -656,20 +607,10 @@ local ok_main, err_main = pcall(function()
             end)
             if ok then
                 response = { id = req_id, result = result_or_err }
-                -- #region agent log
-                if method == "list_clips" then
-                    local n = 0
-                    if type(result_or_err) == "table" then
-                        n = #result_or_err
-                    end
-                    agent_log("H5", "Captain.lua:bridge", "list_clips ok", { count = tostring(n), runId = "post-fix" })
-                end
-                -- #endregion
             else
                 response = { id = req_id, error = { message = tostring(result_or_err) } }
-                -- #region agent log
-                agent_log("H5", "Captain.lua:bridge", "request failed", { method = tostring(method), error = tostring(result_or_err), runId = "post-fix" })
-                -- #endregion
+                script_log("bridge request failed: " .. tostring(method)
+                    .. " — " .. tostring(result_or_err))
             end
             write_file(bridge_dir .. "/response.json", encode_json(response))
         end
@@ -688,16 +629,11 @@ local ok_main, err_main = pcall(function()
     remove_file(bridge_dir .. "/ready.json")
     remove_file(bridge_dir .. "/request.json")
     remove_file(bridge_dir .. "/response.json")
-    -- #region agent log
-    agent_log("H4", "Captain.lua:main", "bridge stopped", { pid = tostring(pid) })
-    -- #endregion
     print("Captain Lua bridge stopped.")
 end)
 
 if not ok_main then
-    -- #region agent log
-    agent_log("H1", "Captain.lua:main", "FATAL", { error = tostring(err_main) })
-    -- #endregion
+    script_log("FATAL: " .. tostring(err_main))
     print("Captain error: " .. tostring(err_main))
     error(err_main)
 end

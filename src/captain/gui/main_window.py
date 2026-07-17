@@ -88,8 +88,11 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         central = QWidget()
         layout = QVBoxLayout(central)
+        layout.setContentsMargins(12, 12, 12, 8)
+        layout.setSpacing(8)
 
         top = QHBoxLayout()
+        top.setSpacing(8)
         self.refresh_btn = QPushButton("Refresh Clips")
         self.refresh_btn.clicked.connect(self._load_clips)
         self.clip_combo = QComboBox()
@@ -102,6 +105,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(top)
 
         self.view = TranscriptView()
+        self.view.setObjectName("transcript")
         self.view.edited.connect(self._on_edited)
         self.view.word_activated.connect(self._jump_to_word)
         layout.addWidget(self.view, stretch=1)
@@ -111,17 +115,18 @@ class MainWindow(QMainWindow):
             "Cmd/Ctrl+V pastes after the current word • Cmd/Ctrl+Z restores "
             "selection • double-click jumps the Resolve playhead"
         )
+        hint.setObjectName("hint")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: gray;")
         layout.addWidget(hint)
 
         bottom = QHBoxLayout()
+        bottom.setSpacing(8)
         self.trim_silence_btn = QPushButton("Trim Silence")
         self.trim_silence_btn.clicked.connect(self._trim_silence)
         self.trim_repeats_btn = QPushButton("Remove Repeats")
         self.trim_repeats_btn.clicked.connect(self._trim_repeats)
         self.apply_btn = QPushButton("Apply → New Timeline")
-        self.apply_btn.setStyleSheet("font-weight: bold;")
+        self.apply_btn.setObjectName("accent")
         self.apply_btn.clicked.connect(self._apply)
         bottom.addWidget(self.trim_silence_btn)
         bottom.addWidget(self.trim_repeats_btn)
@@ -129,14 +134,30 @@ class MainWindow(QMainWindow):
         bottom.addWidget(self.apply_btn)
         layout.addLayout(bottom)
 
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(8)
+        self.stage_label = QLabel("")
+        self.stage_label.setObjectName("stage")
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
-        self.progress.setVisible(False)
-        layout.addWidget(self.progress)
+        self.progress.setFixedHeight(14)
+        progress_row.addWidget(self.stage_label)
+        progress_row.addWidget(self.progress, stretch=1)
+        self._progress_widgets = QWidget()
+        self._progress_widgets.setLayout(progress_row)
+        self._progress_widgets.setVisible(False)
+        layout.addWidget(self._progress_widgets)
 
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
         self._set_editing_enabled(False)
+
+    def _show_progress(self, visible: bool) -> None:
+        self._progress_widgets.setVisible(visible)
+        if not visible:
+            self.stage_label.setText("")
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
 
     def _set_editing_enabled(self, on: bool) -> None:
         for widget in (self.trim_silence_btn, self.trim_repeats_btn, self.apply_btn):
@@ -209,7 +230,7 @@ class MainWindow(QMainWindow):
                 return
 
         self.transcribe_btn.setEnabled(False)
-        self.progress.setVisible(True)
+        self._show_progress(True)
         self.worker = TranscribeWorker(
             self.current_clip, self.transcriber, self.cfg["language"]
         )
@@ -219,18 +240,24 @@ class MainWindow(QMainWindow):
         self.worker.start()
 
     def _on_progress(self, fraction: float, message: str) -> None:
-        self.progress.setValue(int(fraction * 100))
+        if fraction < 0:
+            # Indeterminate stage (e.g. loading the model into memory).
+            self.progress.setRange(0, 0)
+        else:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(int(fraction * 100))
+        self.stage_label.setText(message)
         self._status(message)
 
     def _on_transcribed(self, transcript: Transcript) -> None:
         self.transcribe_btn.setEnabled(True)
-        self.progress.setVisible(False)
+        self._show_progress(False)
         self._save_session(transcript)
         self._show_transcript(transcript)
 
     def _on_transcribe_failed(self, message: str) -> None:
         self.transcribe_btn.setEnabled(True)
-        self.progress.setVisible(False)
+        self._show_progress(False)
         QMessageBox.critical(self, "Captain", f"Transcription failed:\n{message}")
 
     def _show_transcript(self, transcript: Transcript) -> None:

@@ -10,10 +10,12 @@ def main() -> int:
 
     from . import config
     from .gui.main_window import MainWindow
+    from .gui.theme import apply_theme
 
     config.setup_logging()
     app = QApplication(sys.argv)
     app.setApplicationName("Captain")
+    apply_theme(app)
     window = MainWindow()
     window.show()
     return app.exec()
