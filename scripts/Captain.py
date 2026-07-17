@@ -1,16 +1,14 @@
-"""Captain launcher for DaVinci Resolve.
+"""Captain launcher for DaVinci Resolve (Workspace → Scripts → Captain).
 
-Installed into Resolve's Fusion/Scripts/Utility folder so it appears under
-Workspace > Scripts > Captain. It spawns the external Captain app (which has
-its own Python virtualenv) as a detached process.
-
-The install location is read from install.json in Captain's data directory,
-written by setupfiles/install-mac.sh.
+Runs inside Resolve's scripting process so Free and Studio both get a live
+`resolve` object. Starts a localhost IPC bridge, then opens the external
+PySide6 UI which talks to Resolve only through that bridge.
 """
+
+from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 
 
@@ -22,29 +20,43 @@ def _data_dir():
     return os.path.expanduser("~/.local/share/Captain")
 
 
-def main():
+def _bootstrap():
     install_file = os.path.join(_data_dir(), "install.json")
     try:
         with open(install_file) as f:
             install = json.load(f)
-        python = install["python"]
         app_dir = install["app_dir"]
     except (OSError, KeyError, ValueError):
         print(
             "Captain is not installed. Run setupfiles/install-mac.sh from the "
             "Captain repository first."
         )
+        return None
+
+    src = os.path.join(app_dir, "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    return install
+
+
+def main():
+    if _bootstrap() is None:
         return
 
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.path.join(app_dir, "src")
-    kwargs = {"env": env, "cwd": app_dir}
-    if sys.platform == "win32":
-        kwargs["creationflags"] = 0x00000008  # DETACHED_PROCESS
-    else:
-        kwargs["start_new_session"] = True
-    subprocess.Popen([python, "-m", "captain.main"], **kwargs)
-    print("Captain launched.")
+    # `resolve` is injected by DaVinci Resolve when this file is run from
+    # Workspace → Scripts. Capture it from this module's globals.
+    resolve_obj = globals().get("resolve")
+
+    from captain.api import ResolveError
+    from captain.launcher import run
+
+    try:
+        run(resolve_obj)
+    except ResolveError as e:
+        print(f"Captain error: {e}")
+    except Exception as e:
+        print(f"Captain failed: {e}")
+        raise
 
 
 main()

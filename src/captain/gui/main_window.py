@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import config
-from ..api import ClipInfo, ResolveError, ResolveHandler
+from ..api import ClipInfo, ResolveError, create_resolve_handler
 from ..assemble import build_fcp7_xml, seconds_to_source_frames
 from ..engine import Transcriber, extract_audio
 from ..transcript import Transcript, find_repeats, find_silence_gaps
@@ -69,7 +69,7 @@ class MainWindow(QMainWindow):
         self.resize(900, 640)
 
         self.cfg = config.load_config()
-        self.resolve = ResolveHandler()
+        self.resolve = create_resolve_handler()
         self.transcriber = Transcriber(
             model_name=self.cfg["whisper_model"],
             device=self.cfg["whisper_device"],
@@ -150,7 +150,11 @@ class MainWindow(QMainWindow):
     def _connect_resolve(self) -> None:
         try:
             self.resolve.connect()
-            self._status("Connected to DaVinci Resolve")
+            mode = getattr(self.resolve, "mode", "direct")
+            if mode == "bridge":
+                self._status("Connected to DaVinci Resolve via Scripts bridge (Free/Studio)")
+            else:
+                self._status("Connected to DaVinci Resolve (direct)")
             self._load_clips()
         except ResolveError as e:
             self._status(str(e))

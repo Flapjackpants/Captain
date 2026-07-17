@@ -50,4 +50,5 @@ EOF
 
 echo
 echo "Done. In DaVinci Resolve: Workspace > Scripts > Captain"
+echo "Works on Resolve Free and Studio (IPC bridge keeps scripting in-process)."
 echo "(The first transcription downloads the Whisper model; later runs are fast.)"

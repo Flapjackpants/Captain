@@ -1,7 +1,16 @@
 """Bridge to DaVinci Resolve's Python scripting API.
 
-Captain runs as an external process, so we locate and import
-DaVinciResolveScript manually, then talk to the running Resolve instance.
+Two connection modes:
+
+1. **IPC bridge (Free + Studio)** — preferred. Resolve launches
+   ``scripts/Captain.py``, which holds the live ``resolve`` object and serves
+   it over a localhost JSON-RPC bridge. The UI process sets
+   ``CAPTAIN_BRIDGE_URL`` / ``CAPTAIN_BRIDGE_TOKEN`` and never calls
+   ``scriptapp`` itself. This is required for Resolve Free (external
+   ``scriptapp`` is Studio-only since 19.1).
+
+2. **Direct scriptapp (Studio only)** — fallback when the UI is started
+   outside the Scripts menu and no bridge env vars are set.
 """
 
 from __future__ import annotations
@@ -13,6 +22,9 @@ from dataclasses import dataclass
 from typing import Any
 
 log = logging.getLogger("Captain.api")
+
+ENV_BRIDGE_URL = "CAPTAIN_BRIDGE_URL"
+ENV_BRIDGE_TOKEN = "CAPTAIN_BRIDGE_TOKEN"
 
 
 def _module_candidates() -> list[str]:
@@ -55,6 +67,7 @@ def _import_resolve_script():
 
 @dataclass
 class ClipInfo:
+    clip_id: str
     name: str
     track_type: str  # "video" | "audio"
     track_index: int
@@ -64,8 +77,8 @@ class ClipInfo:
     source_end_frame: int
     file_path: str
     fps: float
-    item: Any  # TimelineItem
-    media_pool_item: Any  # MediaPoolItem or None
+    item: Any = None  # TimelineItem — only on the Resolve host process
+    media_pool_item: Any = None  # MediaPoolItem — only on the host
 
     @property
     def source_start_sec(self) -> float:
@@ -75,14 +88,51 @@ class ClipInfo:
     def duration_sec(self) -> float:
         return (self.source_end_frame - self.source_start_frame) / self.fps
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "clip_id": self.clip_id,
+            "name": self.name,
+            "track_type": self.track_type,
+            "track_index": self.track_index,
+            "timeline_start_frame": self.timeline_start_frame,
+            "timeline_end_frame": self.timeline_end_frame,
+            "source_start_frame": self.source_start_frame,
+            "source_end_frame": self.source_end_frame,
+            "file_path": self.file_path,
+            "fps": self.fps,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ClipInfo":
+        return cls(
+            clip_id=data["clip_id"],
+            name=data["name"],
+            track_type=data["track_type"],
+            track_index=int(data["track_index"]),
+            timeline_start_frame=int(data["timeline_start_frame"]),
+            timeline_end_frame=int(data["timeline_end_frame"]),
+            source_start_frame=int(data["source_start_frame"]),
+            source_end_frame=int(data["source_end_frame"]),
+            file_path=data.get("file_path") or "",
+            fps=float(data["fps"]),
+        )
+
 
 class ResolveError(RuntimeError):
     pass
 
 
+def _make_clip_id(track_type: str, track_index: int, start: int, source_start: int) -> str:
+    return f"{track_type}:{track_index}:{start}:{source_start}"
+
+
 class ResolveHandler:
+    """Direct Resolve API host. Used by the bridge server (and Studio fallback)."""
+
     def __init__(self) -> None:
         self.resolve = None
+        self._clips: dict[str, ClipInfo] = {}
+        self.mode = "none"  # "direct" | "injected" | "bridge" | "none"
 
     # ---- connection -----------------------------------------------------
 
@@ -97,11 +147,24 @@ class ResolveHandler:
         self.resolve = drs.scriptapp("Resolve")
         if self.resolve is None:
             raise ResolveError(
-                "Could not connect to DaVinci Resolve. Make sure Resolve is "
-                "running with a project open, and that scripting is enabled in "
-                "Preferences > System > General ('Local' or 'Network')."
+                "Could not connect to DaVinci Resolve via scriptapp(). "
+                "On Resolve Free, launch Captain from Workspace → Scripts → Captain "
+                "(external scripting is Studio-only). On Studio, make sure Resolve "
+                "is running with a project open and scripting is set to Local."
             )
-        log.info("Connected to Resolve %s", self.resolve.GetVersionString())
+        self.mode = "direct"
+        log.info("Connected to Resolve %s (direct)", self.resolve.GetVersionString())
+
+    def connect_from_object(self, resolve: Any) -> None:
+        if resolve is None:
+            raise ResolveError("Resolve did not inject a resolve object into the script.")
+        self.resolve = resolve
+        self.mode = "injected"
+        try:
+            version = resolve.GetVersionString()
+        except Exception:
+            version = "unknown"
+        log.info("Connected to Resolve %s (Scripts-injected)", version)
 
     @property
     def connected(self) -> bool:
@@ -119,7 +182,22 @@ class ResolveHandler:
             raise ResolveError("No timeline is open in Resolve.")
         return timeline
 
+    def _lookup_clip(self, clip: ClipInfo | str) -> ClipInfo:
+        clip_id = clip if isinstance(clip, str) else clip.clip_id
+        cached = self._clips.get(clip_id)
+        if cached is None:
+            raise ResolveError(
+                f"Unknown clip id {clip_id!r}. Refresh the clip list and try again."
+            )
+        return cached
+
     # ---- reads ----------------------------------------------------------
+
+    def version_string(self) -> str:
+        try:
+            return str(self.resolve.GetVersionString())
+        except Exception:
+            return "unknown"
 
     def timeline_name(self) -> str:
         return self._timeline().GetName()
@@ -137,6 +215,7 @@ class ResolveHandler:
         timeline = self._timeline()
         fps = self.timeline_fps()
         clips: list[ClipInfo] = []
+        self._clips.clear()
         for track_type in ("video", "audio"):
             count = timeline.GetTrackCount(track_type)
             for idx in range(1, int(count) + 1):
@@ -145,27 +224,34 @@ class ResolveHandler:
                     file_path = ""
                     if mp_item is not None:
                         file_path = mp_item.GetClipProperty("File Path") or ""
-                    clips.append(
-                        ClipInfo(
-                            name=item.GetName(),
-                            track_type=track_type,
-                            track_index=idx,
-                            timeline_start_frame=int(item.GetStart()),
-                            timeline_end_frame=int(item.GetEnd()),
-                            source_start_frame=int(item.GetSourceStartFrame()),
-                            source_end_frame=int(item.GetSourceEndFrame()),
-                            file_path=file_path,
-                            fps=fps,
-                            item=item,
-                            media_pool_item=mp_item,
-                        )
+                    start = int(item.GetStart())
+                    source_start = int(item.GetSourceStartFrame())
+                    clip_id = _make_clip_id(track_type, idx, start, source_start)
+                    clip = ClipInfo(
+                        clip_id=clip_id,
+                        name=item.GetName(),
+                        track_type=track_type,
+                        track_index=idx,
+                        timeline_start_frame=start,
+                        timeline_end_frame=int(item.GetEnd()),
+                        source_start_frame=source_start,
+                        source_end_frame=int(item.GetSourceEndFrame()),
+                        file_path=file_path,
+                        fps=fps,
+                        item=item,
+                        media_pool_item=mp_item,
                     )
+                    self._clips[clip_id] = clip
+                    clips.append(clip)
         return clips
 
     # ---- playhead sync --------------------------------------------------
 
-    def jump_to_clip_second(self, clip: ClipInfo, second_in_clip: float) -> None:
+    def jump_to_clip_second(self, clip: ClipInfo | str, second_in_clip: float) -> None:
         """Move the Edit-page playhead to a media-relative time within a clip."""
+        clip = self._lookup_clip(clip) if isinstance(clip, str) else (
+            self._clips.get(clip.clip_id) or clip
+        )
         self.resolve.OpenPage("edit")
         timeline = self._timeline()
         source_offset = second_in_clip - clip.source_start_sec
@@ -175,7 +261,7 @@ class ResolveHandler:
 
     @staticmethod
     def _frame_to_timecode(frame: int, fps: float) -> str:
-        fps_i = int(round(fps))
+        fps_i = max(1, int(round(fps)))
         ff = frame % fps_i
         ss = (frame // fps_i) % 60
         mm = (frame // (fps_i * 60)) % 60
@@ -203,14 +289,15 @@ class ResolveHandler:
 
     def assemble_append(
         self,
-        clip: ClipInfo,
-        keep_ranges_frames: list[tuple[int, int]],
+        clip: ClipInfo | str,
+        keep_ranges_frames: list[tuple[int, int]] | list[list[int]],
         new_name: str,
     ) -> bool:
         """Fallback path: build the new timeline with AppendToTimeline."""
-        if clip.media_pool_item is None:
+        host_clip = self._lookup_clip(clip)
+        if host_clip.media_pool_item is None:
             raise ResolveError(
-                f"Clip '{clip.name}' has no media pool item; cannot assemble."
+                f"Clip '{host_clip.name}' has no media pool item; cannot assemble."
             )
         media_pool = self._project().GetMediaPool()
         timeline = media_pool.CreateEmptyTimeline(new_name)
@@ -219,15 +306,118 @@ class ResolveHandler:
         self._project().SetCurrentTimeline(timeline)
         entries = [
             {
-                "mediaPoolItem": clip.media_pool_item,
-                "startFrame": start,
-                "endFrame": end,
+                "mediaPoolItem": host_clip.media_pool_item,
+                "startFrame": int(start),
+                "endFrame": int(end),
             }
             for start, end in keep_ranges_frames
         ]
-        # Append in chunks; huge single calls have been flaky in practice.
         for i in range(0, len(entries), 50):
             if not media_pool.AppendToTimeline(entries[i : i + 50]):
                 log.warning("AppendToTimeline chunk %d failed", i // 50)
                 return False
         return True
+
+    # ---- bridge dispatch (host process) ---------------------------------
+
+    def bridge_dispatch(self, method: str, params: dict) -> Any:
+        if method == "ping":
+            return {"ok": True, "version": self.version_string(), "mode": self.mode}
+        if method == "timeline_name":
+            return self.timeline_name()
+        if method == "timeline_fps":
+            return self.timeline_fps()
+        if method == "list_clips":
+            return [c.to_dict() for c in self.list_clips()]
+        if method == "jump_to_clip_second":
+            self.jump_to_clip_second(params["clip_id"], float(params["second_in_clip"]))
+            return True
+        if method == "import_timeline_xml":
+            return bool(self.import_timeline_xml(params["xml_path"]))
+        if method == "assemble_append":
+            ranges = [tuple(r) for r in params["keep_ranges_frames"]]
+            return bool(
+                self.assemble_append(params["clip_id"], ranges, params["new_name"])
+            )
+        raise ResolveError(f"Unknown bridge method: {method}")
+
+
+class BridgedResolveHandler:
+    """UI-side Resolve facade that talks to the Scripts-process bridge."""
+
+    def __init__(self, url: str, token: str) -> None:
+        from .bridge import BridgeClient
+
+        self._client = BridgeClient.from_url(url, token)
+        self.mode = "bridge"
+        self.resolve = None  # unused; kept for duck-typing
+
+    def connect(self) -> None:
+        try:
+            self._client.connect()
+            info = self._client.call("ping")
+        except Exception as e:
+            raise ResolveError(
+                f"Could not connect to the Captain Resolve bridge ({e}). "
+                "Launch Captain from Workspace → Scripts → Captain."
+            ) from e
+        log.info(
+            "Connected via IPC bridge to Resolve %s",
+            (info or {}).get("version", "unknown"),
+        )
+
+    @property
+    def connected(self) -> bool:
+        return self._client._sock is not None
+
+    def version_string(self) -> str:
+        return (self._client.call("ping") or {}).get("version", "unknown")
+
+    def timeline_name(self) -> str:
+        return self._client.call("timeline_name")
+
+    def timeline_fps(self) -> float:
+        return float(self._client.call("timeline_fps"))
+
+    def list_clips(self) -> list[ClipInfo]:
+        return [ClipInfo.from_dict(d) for d in self._client.call("list_clips")]
+
+    def jump_to_clip_second(self, clip: ClipInfo | str, second_in_clip: float) -> None:
+        clip_id = clip if isinstance(clip, str) else clip.clip_id
+        self._client.call(
+            "jump_to_clip_second",
+            {"clip_id": clip_id, "second_in_clip": second_in_clip},
+        )
+
+    def import_timeline_xml(self, xml_path: str) -> bool:
+        return bool(self._client.call("import_timeline_xml", {"xml_path": xml_path}))
+
+    def assemble_append(
+        self,
+        clip: ClipInfo | str,
+        keep_ranges_frames: list[tuple[int, int]],
+        new_name: str,
+    ) -> bool:
+        clip_id = clip if isinstance(clip, str) else clip.clip_id
+        return bool(
+            self._client.call(
+                "assemble_append",
+                {
+                    "clip_id": clip_id,
+                    "keep_ranges_frames": [list(r) for r in keep_ranges_frames],
+                    "new_name": new_name,
+                },
+            )
+        )
+
+    def close(self) -> None:
+        self._client.close()
+
+
+def create_resolve_handler() -> ResolveHandler | BridgedResolveHandler:
+    """Pick IPC bridge when env vars are set; otherwise direct scriptapp."""
+    url = os.environ.get(ENV_BRIDGE_URL)
+    token = os.environ.get(ENV_BRIDGE_TOKEN)
+    if url and token:
+        return BridgedResolveHandler(url, token)
+    return ResolveHandler()

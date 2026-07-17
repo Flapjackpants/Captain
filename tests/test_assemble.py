@@ -6,6 +6,7 @@ from captain.assemble import build_fcp7_xml, seconds_to_source_frames
 
 def make_clip(track_type="video", fps=24.0, src_start=100, src_end=2500):
     return ClipInfo(
+        clip_id=f"{track_type}:1:86400:{src_start}",
         name="Interview A",
         track_type=track_type,
         track_index=1,
