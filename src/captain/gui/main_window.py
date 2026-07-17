@@ -9,17 +9,19 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QStatusBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -34,7 +36,14 @@ from .transcript_view import TranscriptView
 log = logging.getLogger("Captain.gui")
 
 APPLY_REPLACE = "replace_in_place"
+APPLY_RIPPLE = "replace_ripple"
 APPLY_NEW = "new_timeline"
+
+APPLY_LABELS = {
+    APPLY_REPLACE: "Apply → Replace",
+    APPLY_RIPPLE: "Apply → Ripple Replace",
+    APPLY_NEW: "Apply → New Timeline",
+}
 
 
 class TranscribeWorker(QThread):
@@ -168,19 +177,32 @@ class MainWindow(QMainWindow):
         bottom.addWidget(self.trim_repeats_btn)
         bottom.addStretch(1)
 
-        bottom.addWidget(QLabel("Apply"))
-        self.apply_mode_combo = QComboBox()
-        self.apply_mode_combo.addItem("Replace clip in place", APPLY_REPLACE)
-        self.apply_mode_combo.addItem("New timeline", APPLY_NEW)
-        mode = self.cfg.get("apply_mode", APPLY_REPLACE)
-        idx = self.apply_mode_combo.findData(mode)
-        self.apply_mode_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        self.apply_mode_combo.currentIndexChanged.connect(self._on_apply_mode_changed)
-        bottom.addWidget(self.apply_mode_combo)
-
-        self.apply_btn = QPushButton("Apply → Replace Clip")
+        self.apply_btn = QToolButton()
         self.apply_btn.setObjectName("accent")
+        self.apply_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.apply_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
         self.apply_btn.clicked.connect(self._apply)
+
+        apply_menu = QMenu(self.apply_btn)
+        self._apply_action_group = QActionGroup(self)
+        self._apply_action_group.setExclusive(True)
+        self._apply_actions: dict[str, QAction] = {}
+        for mode, title in (
+            (APPLY_REPLACE, "Replace in place (keep other tracks)"),
+            (APPLY_RIPPLE, "Replace in place (ripple)"),
+            (APPLY_NEW, "New timeline"),
+        ):
+            action = QAction(title, self)
+            action.setCheckable(True)
+            action.setData(mode)
+            self._apply_action_group.addAction(action)
+            apply_menu.addAction(action)
+            self._apply_actions[mode] = action
+            action.triggered.connect(self._on_apply_mode_action)
+        self.apply_btn.setMenu(apply_menu)
+
+        mode = config.normalize_apply_mode(self.cfg.get("apply_mode"))
+        self.cfg["apply_mode"] = mode
         bottom.addWidget(self.apply_btn)
         layout.addLayout(bottom)
 
@@ -215,7 +237,6 @@ class MainWindow(QMainWindow):
             self.trim_silence_btn,
             self.trim_repeats_btn,
             self.apply_btn,
-            self.apply_mode_combo,
             self.search_edit,
             self.search_prev_btn,
             self.search_next_btn,
@@ -226,19 +247,29 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message)
 
     def _apply_mode(self) -> str:
-        data = self.apply_mode_combo.currentData()
-        return data if isinstance(data, str) else APPLY_REPLACE
+        return config.normalize_apply_mode(self.cfg.get("apply_mode"))
 
-    def _on_apply_mode_changed(self) -> None:
-        self.cfg["apply_mode"] = self._apply_mode()
+    def _on_apply_mode_action(self) -> None:
+        action = self._apply_action_group.checkedAction()
+        if action is None:
+            return
+        mode = action.data()
+        if not isinstance(mode, str):
+            return
+        self.cfg["apply_mode"] = config.normalize_apply_mode(mode)
         config.save_config(self.cfg)
         self._update_apply_button()
 
     def _update_apply_button(self) -> None:
-        if self._apply_mode() == APPLY_NEW:
-            self.apply_btn.setText("Apply → New Timeline")
-        else:
-            self.apply_btn.setText("Apply → Replace Clip")
+        mode = self._apply_mode()
+        self.apply_btn.setText(APPLY_LABELS.get(mode, APPLY_LABELS[APPLY_REPLACE]))
+        action = self._apply_actions.get(mode)
+        if action is not None:
+            action.setChecked(True)
+        # Size for the longest label so the menu-button never clips text.
+        metrics = self.apply_btn.fontMetrics()
+        text_w = max(metrics.horizontalAdvance(t) for t in APPLY_LABELS.values())
+        self.apply_btn.setMinimumWidth(text_w + 52)  # padding + menu-button strip
 
     # ---- Resolve ----------------------------------------------------------
 
@@ -501,18 +532,29 @@ class MainWindow(QMainWindow):
         frames = seconds_to_source_frames(keep, clip)
         mode = self._apply_mode()
 
-        if mode == APPLY_REPLACE:
-            self._apply_replace(clip, frames)
-        else:
+        if mode == APPLY_NEW:
             self._apply_new_timeline(clip, frames)
+        else:
+            self._apply_replace(clip, frames, ripple=(mode == APPLY_RIPPLE))
 
-    def _apply_replace(self, clip: ClipInfo, frames: list[tuple[int, int]]) -> None:
+    def _apply_replace(
+        self, clip: ClipInfo, frames: list[tuple[int, int]], *, ripple: bool
+    ) -> None:
+        if ripple:
+            detail = (
+                "This ripple-deletes the clip and may shift later clips on "
+                "other tracks."
+            )
+        else:
+            detail = (
+                "This deletes the clip without rippling (other tracks keep "
+                "their timing; a gap may remain if the edit is shorter)."
+            )
         answer = QMessageBox.question(
             self,
             "Captain",
             f"Replace '{clip.name}' on the current timeline with "
-            f"{len(frames)} edited segment(s)?\n\n"
-            "This modifies the current timeline (ripple delete + insert).",
+            f"{len(frames)} edited segment(s)?\n\n{detail}",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
@@ -520,10 +562,11 @@ class MainWindow(QMainWindow):
         try:
             # Ensure host has TimelineItem cached.
             self.resolve.list_clips()
-            ok = self.resolve.replace_clip_in_place(clip, frames)
+            ok = self.resolve.replace_clip_in_place(clip, frames, ripple=ripple)
             if ok:
+                kind = "ripple" if ripple else "in place"
                 self._status(
-                    f"Replaced '{clip.name}' in place ({len(frames)} segments)"
+                    f"Replaced '{clip.name}' {kind} ({len(frames)} segments)"
                 )
                 QMessageBox.information(
                     self,

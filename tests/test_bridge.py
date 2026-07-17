@@ -58,7 +58,11 @@ class FakeHost:
             return True
         if method == "replace_clip_in_place":
             self.replaced.append(
-                (params["clip_id"], params["keep_ranges_frames"])
+                (
+                    params["clip_id"],
+                    params["keep_ranges_frames"],
+                    bool(params.get("ripple", False)),
+                )
             )
             return True
         raise ResolveError(f"unknown {method}")
@@ -123,7 +127,11 @@ def test_bridged_handler_methods(bridge_pair):
     playhead = handler.clip_under_playhead()
     assert playhead.clip_id == "video:1:0:0"
     assert handler.replace_clip_in_place(clips[0], [(0, 10), (40, 50)]) is True
-    assert host.replaced[0] == ("video:1:0:0", [[0, 10], [40, 50]])
+    assert host.replaced[0] == ("video:1:0:0", [[0, 10], [40, 50]], False)
+    assert handler.replace_clip_in_place(
+        clips[0], [(5, 15)], ripple=True
+    ) is True
+    assert host.replaced[1] == ("video:1:0:0", [[5, 15]], True)
     handler.close()
 
 

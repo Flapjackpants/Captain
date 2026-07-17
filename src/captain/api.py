@@ -374,9 +374,16 @@ class ResolveHandler:
         self,
         clip: ClipInfo | str,
         keep_ranges_frames: list[tuple[int, int]] | list[list[int]],
+        *,
+        ripple: bool = False,
     ) -> bool:
-        """Ripple-delete the clip on the current timeline and insert keep ranges
-        at the same record position / track."""
+        """Delete the clip on the current timeline and insert keep ranges
+        at the same record position / track.
+
+        When ``ripple`` is False (default), other tracks keep their timing
+        and a gap may remain if the edit is shorter. When True, Resolve
+        ripple-deletes and later clips on the timeline may shift.
+        """
         if not self._clips:
             self.list_clips()
         host_clip = self._lookup_clip(clip)
@@ -398,10 +405,35 @@ class ResolveHandler:
         timeline = self._timeline()
         item = host_clip.item
         record_frame = int(item.GetStart())
-        track_index = host_clip.track_index
-        media_type = 1 if host_clip.track_type == "video" else 2
 
-        if not timeline.DeleteClips([item], True):
+        # Delete primary + linked A/V together, then re-insert both. Otherwise
+        # ripple drops audio, and non-ripple leaves full-length audio behind.
+        to_delete = [item]
+        video_tracks: list[int] = []
+        audio_tracks: list[int] = []
+
+        def _add_track(track_type: str, track_index: int) -> None:
+            bucket = audio_tracks if track_type == "audio" else video_tracks
+            if track_index not in bucket:
+                bucket.append(track_index)
+
+        _add_track(host_clip.track_type, host_clip.track_index)
+
+        try:
+            linked = item.GetLinkedItems() or []
+        except Exception:
+            linked = []
+        for linked_item in linked:
+            for track_type in ("video", "audio"):
+                count = int(timeline.GetTrackCount(track_type) or 0)
+                for idx in range(1, count + 1):
+                    for other in timeline.GetItemListInTrack(track_type, idx) or []:
+                        if other == linked_item:
+                            _add_track(track_type, idx)
+                            if linked_item not in to_delete:
+                                to_delete.append(linked_item)
+
+        if not timeline.DeleteClips(to_delete, bool(ripple)):
             raise ResolveError(f"Failed to delete clip '{host_clip.name}' from the timeline.")
 
         media_pool = self._project().GetMediaPool()
@@ -409,16 +441,40 @@ class ResolveHandler:
         rf = record_frame
         for start, end in ranges:
             duration = max(0, end - start)
-            entries.append(
-                {
-                    "mediaPoolItem": host_clip.media_pool_item,
-                    "startFrame": start,
-                    "endFrame": end,
-                    "trackIndex": track_index,
-                    "recordFrame": rf,
-                    "mediaType": media_type,
-                }
-            )
+            for vidx in video_tracks:
+                entries.append(
+                    {
+                        "mediaPoolItem": host_clip.media_pool_item,
+                        "startFrame": start,
+                        "endFrame": end,
+                        "trackIndex": vidx,
+                        "recordFrame": rf,
+                        "mediaType": 1,
+                    }
+                )
+            for aidx in audio_tracks:
+                entries.append(
+                    {
+                        "mediaPoolItem": host_clip.media_pool_item,
+                        "startFrame": start,
+                        "endFrame": end,
+                        "trackIndex": aidx,
+                        "recordFrame": rf,
+                        "mediaType": 2,
+                    }
+                )
+            if not video_tracks and not audio_tracks:
+                media_type = 2 if host_clip.track_type == "audio" else 1
+                entries.append(
+                    {
+                        "mediaPoolItem": host_clip.media_pool_item,
+                        "startFrame": start,
+                        "endFrame": end,
+                        "trackIndex": host_clip.track_index,
+                        "recordFrame": rf,
+                        "mediaType": media_type,
+                    }
+                )
             rf += duration
 
         for i in range(0, len(entries), 50):
@@ -454,7 +510,10 @@ class ResolveHandler:
             )
         if method == "replace_clip_in_place":
             ranges = [tuple(r) for r in params["keep_ranges_frames"]]
-            return bool(self.replace_clip_in_place(params["clip_id"], ranges))
+            ripple = bool(params.get("ripple", False))
+            return bool(
+                self.replace_clip_in_place(params["clip_id"], ranges, ripple=ripple)
+            )
         raise ResolveError(f"Unknown bridge method: {method}")
 
 
@@ -534,6 +593,8 @@ class BridgedResolveHandler:
         self,
         clip: ClipInfo | str,
         keep_ranges_frames: list[tuple[int, int]],
+        *,
+        ripple: bool = False,
     ) -> bool:
         clip_id = clip if isinstance(clip, str) else clip.clip_id
         return bool(
@@ -542,6 +603,7 @@ class BridgedResolveHandler:
                 {
                     "clip_id": clip_id,
                     "keep_ranges_frames": [list(r) for r in keep_ranges_frames],
+                    "ripple": bool(ripple),
                 },
             )
         )

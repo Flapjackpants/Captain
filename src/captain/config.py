@@ -20,9 +20,18 @@ DEFAULTS: dict[str, Any] = {
     "silence_max_pause": 0.25,     # silence retained at each trimmed junction
     "repeat_max_ngram": 8,
     "new_timeline_suffix": " [Captain]",
-    # "replace_in_place" | "new_timeline"
+    # "replace_in_place" (non-ripple) | "replace_ripple" | "new_timeline"
     "apply_mode": "replace_in_place",
 }
+
+APPLY_MODES = frozenset({"replace_in_place", "replace_ripple", "new_timeline"})
+
+
+def normalize_apply_mode(mode: Any) -> str:
+    """Return a valid apply_mode; unknown values fall back to the default."""
+    if mode in APPLY_MODES:
+        return str(mode)
+    return str(DEFAULTS["apply_mode"])
 
 
 def data_dir() -> Path:
@@ -59,6 +68,7 @@ def load_config() -> dict[str, Any]:
         cfg.update(json.loads(_config_path().read_text()))
     except (OSError, ValueError):
         pass
+    cfg["apply_mode"] = normalize_apply_mode(cfg.get("apply_mode"))
     return cfg
 
 

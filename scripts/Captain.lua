@@ -562,7 +562,21 @@ local function assemble_append(clip_id, keep_ranges_frames, new_name)
     return true
 end
 
-local function replace_clip_in_place(clip_id, keep_ranges_frames)
+local function find_item_track(timeline, item)
+    for _, tt in ipairs({ "video", "audio" }) do
+        local count = timeline:GetTrackCount(tt) or 0
+        for idx = 1, count do
+            for _, it in ipairs(timeline:GetItemListInTrack(tt, idx) or {}) do
+                if it == item then
+                    return tt, idx
+                end
+            end
+        end
+    end
+    return nil, nil
+end
+
+local function replace_clip_in_place(clip_id, keep_ranges_frames, ripple)
     local clip = clips_by_id[clip_id]
     if not clip then
         list_clips()
@@ -580,14 +594,43 @@ local function replace_clip_in_place(clip_id, keep_ranges_frames)
     if not keep_ranges_frames or #keep_ranges_frames == 0 then
         error("Nothing left to keep.")
     end
+    if ripple == nil then
+        ripple = false
+    end
     local timeline = current_timeline()
     local record_frame = safe_number(clip._item:GetStart(), clip.timeline_start_frame)
-    local track_index = clip.track_index
-    local media_type = 1
-    if clip.track_type == "audio" then
-        media_type = 2
+
+    -- Primary + linked A/V must be deleted and re-inserted together. Otherwise
+    -- ripple drops audio entirely, and non-ripple leaves full-length audio.
+    local to_delete = { clip._item }
+    local video_tracks = {}
+    local audio_tracks = {}
+    local function add_track(tt, idx)
+        if not tt or not idx then
+            return
+        end
+        local list = (tt == "audio") and audio_tracks or video_tracks
+        for _, existing in ipairs(list) do
+            if existing == idx then
+                return
+            end
+        end
+        table.insert(list, idx)
     end
-    if not timeline:DeleteClips({ clip._item }, true) then
+    add_track(clip.track_type, clip.track_index)
+
+    local ok_linked, linked = pcall(function()
+        return clip._item:GetLinkedItems()
+    end)
+    if ok_linked and linked then
+        for _, li in ipairs(linked) do
+            local li_tt, li_idx = find_item_track(timeline, li)
+            add_track(li_tt, li_idx)
+            table.insert(to_delete, li)
+        end
+    end
+
+    if not timeline:DeleteClips(to_delete, ripple and true or false) then
         error("Failed to delete clip '" .. tostring(clip.name) .. "' from the timeline.")
     end
     local media_pool = current_project():GetMediaPool()
@@ -597,16 +640,41 @@ local function replace_clip_in_place(clip_id, keep_ranges_frames)
         local start_f = safe_number(range[1], 0)
         local end_f = safe_number(range[2], 0)
         local duration = math.max(0, end_f - start_f)
-        table.insert(entries, {
-            mediaPoolItem = clip._mp,
-            startFrame = start_f,
-            endFrame = end_f,
-            trackIndex = track_index,
-            recordFrame = rf,
-            mediaType = media_type,
-        })
+        for _, vidx in ipairs(video_tracks) do
+            table.insert(entries, {
+                mediaPoolItem = clip._mp,
+                startFrame = start_f,
+                endFrame = end_f,
+                trackIndex = vidx,
+                recordFrame = rf,
+                mediaType = 1,
+            })
+        end
+        for _, aidx in ipairs(audio_tracks) do
+            table.insert(entries, {
+                mediaPoolItem = clip._mp,
+                startFrame = start_f,
+                endFrame = end_f,
+                trackIndex = aidx,
+                recordFrame = rf,
+                mediaType = 2,
+            })
+        end
+        -- Audio-only or video-only clip with no opposite track still needs one entry.
+        if #video_tracks == 0 and #audio_tracks == 0 then
+            local media_type = (clip.track_type == "audio") and 2 or 1
+            table.insert(entries, {
+                mediaPoolItem = clip._mp,
+                startFrame = start_f,
+                endFrame = end_f,
+                trackIndex = clip.track_index,
+                recordFrame = rf,
+                mediaType = media_type,
+            })
+        end
         rf = rf + duration
     end
+
     local i = 1
     while i <= #entries do
         local chunk = {}
@@ -641,7 +709,11 @@ local function dispatch(method, params)
     elseif method == "assemble_append" then
         return assemble_append(params.clip_id, params.keep_ranges_frames, params.new_name)
     elseif method == "replace_clip_in_place" then
-        return replace_clip_in_place(params.clip_id, params.keep_ranges_frames)
+        return replace_clip_in_place(
+            params.clip_id,
+            params.keep_ranges_frames,
+            params.ripple
+        )
     else
         error("Unknown bridge method: " .. tostring(method))
     end

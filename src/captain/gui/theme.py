@@ -58,6 +58,53 @@ QPushButton#accent:disabled {{
     color: #8d7b78;
 }}
 
+QToolButton {{
+    background-color: {BG_PANEL};
+    border: 1px solid {BORDER};
+    border-radius: 4px;
+    padding: 6px 16px;
+    min-height: 16px;
+}}
+QToolButton:hover {{
+    background-color: #33333b;
+    border-color: {BORDER_LIGHT};
+}}
+QToolButton:pressed {{
+    background-color: {BG_INPUT};
+}}
+QToolButton:disabled {{
+    background-color: #232329;
+    color: #5b5b63;
+}}
+QToolButton#accent {{
+    background-color: {ACCENT_DARK};
+    color: #f4f4f6;
+    font-weight: 600;
+    border: 1px solid #7d2a21;
+    /* Extra right padding so label clears the menu-button strip. */
+    padding: 6px 28px 6px 14px;
+}}
+QToolButton#accent:hover {{
+    background-color: {ACCENT};
+}}
+QToolButton#accent:disabled {{
+    background-color: #4a2723;
+    color: #8d7b78;
+}}
+QToolButton#accent::menu-button {{
+    border-left: 1px solid #7d2a21;
+    width: 26px;
+}}
+QToolButton#accent::menu-arrow {{
+    image: none;
+    width: 0px;
+    height: 0px;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #f4f4f6;
+    margin: 0px 7px 0px 0px;
+}}
+
 QComboBox {{
     background-color: {BG_INPUT};
     border: 1px solid {BORDER};

@@ -187,4 +187,8 @@ def test_apply_mode_default():
     from captain import config
 
     assert config.DEFAULTS["apply_mode"] == "replace_in_place"
+    assert "replace_ripple" in config.APPLY_MODES
+    assert config.normalize_apply_mode("replace_ripple") == "replace_ripple"
+    assert config.normalize_apply_mode("bogus") == "replace_in_place"
+    assert config.normalize_apply_mode(None) == "replace_in_place"
 
