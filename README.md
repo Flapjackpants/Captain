@@ -8,23 +8,30 @@ cut/paste them around, auto-trim silence and repeated retakes — and then
 assembles a **new** timeline in Resolve with all your cuts applied. Your
 original timeline is never modified.
 
-Works on **Resolve Free and Studio**. External `scriptapp()` is Studio-only
-since Resolve 19.1, so Captain always launches from **Workspace → Scripts**,
-keeps the live `resolve` handle in that process, and talks to the UI over a
-localhost IPC bridge.
+Works on **Resolve Free and Studio**.
+
+## Launch model (same as BadWords)
+
+There is **no lower-friction Free plugin API** than Workspace → Scripts.
+[BadWords](https://github.com/veritus-git/BadWords) does the same thing: its
+installer drops a thin wrapper into
+`Fusion/Scripts/Utility/`, then you run **Workspace → Scripts → BadWords**
+after restarting Resolve. Captain mirrors that with a single **Captain** entry
+(`Captain.lua`) so it shows up on Free even without a python.org Python.
+
+Studio-only alternatives (Workflow Integrations / Electron) still open a
+separate window and do not remove the one-click Scripts step for Free users.
 
 ## Requirements
 
-- DaVinci Resolve (**Free or Studio**) installed from
+- DaVinci Resolve (**Free or Studio**) from
   [blackmagicdesign.com](https://www.blackmagicdesign.com/products/davinciresolve/)
-  — **not** the Mac App Store version (it lacks scripting support)
-- Launch Captain from **Workspace → Scripts → Captain** (required on Free;
-  also the normal path on Studio)
-- On Studio only: if you ever run the UI standalone, Preferences → System →
-  General → External scripting using = **Local**
-- Python 3.11–3.13
+  — **not** the Mac App Store build
+- Python 3.11–3.13 for the Captain app venv (Homebrew is fine)
 - FFmpeg on your PATH (`brew install ffmpeg`)
-- ~2 GB disk for the Whisper model (downloaded on first transcription)
+- ~2 GB disk for the Whisper model (first transcription)
+
+You do **not** need the Studio “External scripting” preference.
 
 ## Install (macOS)
 
@@ -32,46 +39,31 @@ localhost IPC bridge.
 bash setupfiles/install-mac.sh
 ```
 
-This creates a virtualenv, installs dependencies, and registers the launcher
-with Resolve.
+Then **fully quit and reopen Resolve**, open a project, and run:
+
+**Workspace → Scripts → Captain**
+
+That one entry starts the Resolve bridge and opens the Captain window. Leave
+the script running until you quit Captain.
 
 ## Usage
 
-1. Open DaVinci Resolve with a project and timeline.
-2. **Workspace > Scripts > Captain** — this starts the IPC bridge inside
-   Resolve and opens the Captain window. Leave the script running until you
-   quit Captain (Resolve Free needs that process alive for API access).
-3. Pick a clip from the dropdown and hit **Transcribe** (the first run
-   downloads the Whisper model and is slow; later runs are fast).
-4. Edit the transcript:
-   - Select words, press **Delete** to remove them
-   - **Cmd+X** cuts words, click a destination word, **Cmd+V** pastes after it
-   - **Cmd+Z** restores the selected removed words
-   - Double-click a word to jump the Resolve playhead there
-   - **Trim Silence** marks long pauses for removal
-   - **Remove Repeats** detects immediately repeated phrases (retakes) and
-     removes the first take
-5. Hit **Apply → New Timeline**. Captain builds an FCP7 XML cutlist and
-   imports it as a new timeline in a "Captain" bin (falling back to direct
-   timeline assembly if the import fails).
+1. **Workspace → Scripts → Captain**
+2. Pick a clip → **Transcribe** → edit words → **Apply → New Timeline**
 
-Transcripts are cached per clip under
-`~/Library/Application Support/Captain/sessions/`, so reopening a clip offers
-to load the saved edit session instead of re-transcribing.
+Edit shortcuts: Delete removes, Cmd+X / Cmd+V cut-paste words, Cmd+Z restores
+selection, double-click jumps the playhead. **Trim Silence** / **Remove
+Repeats** mark or apply auto-trims.
 
 ## How Free compatibility works
 
 ```
-Workspace → Scripts → Captain.py   (Resolve's Python, has live `resolve`)
+Workspace → Scripts → Captain.lua   (Resolve Lua, has live resolve)
         │
-        ├─ localhost JSON-RPC bridge (127.0.0.1, token-auth)
+        ├─ file JSON-RPC in ~/Library/Application Support/Captain/bridge/
         │
         └─ spawns → Captain UI (venv + PySide6 + Whisper)
 ```
-
-All timeline reads/writes (clip list, playhead jump, XML import, append
-fallback) go through the bridge. The UI never calls `scriptapp()` when
-launched this way.
 
 ## Configuration
 
@@ -79,21 +71,12 @@ launched this way.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `whisper_model` | `small` | Whisper size: `base`, `small`, `medium`, `large-v3` |
+| `whisper_model` | `small` | `base`, `small`, `medium`, `large-v3` |
 | `whisper_device` | `auto` | `cpu`, `cuda`, or `auto` |
 | `language` | `null` | Force a language code, or autodetect |
 | `silence_min_duration` | `0.8` | Gaps ≥ this many seconds are trimmable |
 | `silence_max_pause` | `0.25` | Silence kept at each trimmed junction |
 | `repeat_max_ngram` | `8` | Longest repeated phrase length to detect |
-
-## Roadmap
-
-- Phase 2: script import + colored compare view (match / missing / extra /
-  incorrect / removed)
-- Phase 3: auto-captions (word-by-word or by section) with SRT export and
-  Text+ effects
-- Phase 4: local AI voice — type words into the transcript and synthesize
-  them with a voice cloned from imported audio or the timeline itself
 
 ## Development
 
@@ -101,7 +84,6 @@ launched this way.
 python3.12 -m venv .venv
 .venv/bin/pip install -r requirements.txt -e ".[dev]"
 .venv/bin/python -m pytest
-.venv/bin/python -m captain.main   # Studio only without bridge env vars
 ```
 
 *Not affiliated with Blackmagic Design.*

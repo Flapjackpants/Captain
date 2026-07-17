@@ -97,7 +97,9 @@ def test_list_clips_roundtrip(bridge_pair):
 
 def test_bridged_handler_methods(bridge_pair):
     host, server, _client = bridge_pair
-    handler = BridgedResolveHandler(server.url, server.token)
+    from captain.bridge import BridgeClient
+
+    handler = BridgedResolveHandler(BridgeClient.from_url(server.url, server.token))
     handler.connect()
     assert handler.timeline_name() == "Episode 1"
     clips = handler.list_clips()
@@ -123,6 +125,17 @@ def test_create_resolve_handler_picks_bridge(monkeypatch):
 
     monkeypatch.setenv(api.ENV_BRIDGE_URL, "127.0.0.1:9")
     monkeypatch.setenv(api.ENV_BRIDGE_TOKEN, "tok")
+    monkeypatch.delenv(api.ENV_BRIDGE_MODE, raising=False)
+    handler = api.create_resolve_handler()
+    assert isinstance(handler, BridgedResolveHandler)
+
+
+def test_create_resolve_handler_picks_file_bridge(monkeypatch, tmp_path):
+    from captain import api
+
+    monkeypatch.setenv(api.ENV_BRIDGE_MODE, "file")
+    monkeypatch.setenv(api.ENV_BRIDGE_DIR, str(tmp_path))
+    monkeypatch.setenv(api.ENV_BRIDGE_TOKEN, "tok")
     handler = api.create_resolve_handler()
     assert isinstance(handler, BridgedResolveHandler)
 
@@ -132,6 +145,8 @@ def test_create_resolve_handler_direct_without_env(monkeypatch):
 
     monkeypatch.delenv(api.ENV_BRIDGE_URL, raising=False)
     monkeypatch.delenv(api.ENV_BRIDGE_TOKEN, raising=False)
+    monkeypatch.delenv(api.ENV_BRIDGE_MODE, raising=False)
+    monkeypatch.delenv(api.ENV_BRIDGE_DIR, raising=False)
     handler = api.create_resolve_handler()
     assert isinstance(handler, ResolveHandler)
 
@@ -156,6 +171,62 @@ def test_clipinfo_dict_roundtrip():
     assert restored.item is None
     assert restored.media_pool_item is None
     assert restored.duration_sec == pytest.approx(100 / 48.0)
+
+
+def test_file_bridge_roundtrip(tmp_path):
+    """Simulate the Lua host: poll request.json, write response.json."""
+    import json
+    import time
+
+    from captain.bridge import FileBridgeClient
+
+    token = "file-token"
+    ready = tmp_path / "ready.json"
+    ready.write_text('{"ok": true}')
+
+    stop = threading.Event()
+
+    def host():
+        req = tmp_path / "request.json"
+        res = tmp_path / "response.json"
+        while not stop.is_set():
+            if req.is_file():
+                try:
+                    msg = json.loads(req.read_text())
+                except ValueError:
+                    time.sleep(0.01)
+                    continue
+                try:
+                    req.unlink()
+                except OSError:
+                    pass
+                if msg.get("method") == "auth":
+                    body = {"id": msg["id"], "result": {"ok": True, "protocol": 1}}
+                    if msg.get("params", {}).get("token") != token:
+                        body = {
+                            "id": msg["id"],
+                            "error": {"message": "Invalid bridge token"},
+                        }
+                elif msg.get("method") == "timeline_name":
+                    body = {"id": msg["id"], "result": "File Timeline"}
+                else:
+                    body = {
+                        "id": msg["id"],
+                        "error": {"message": f"unknown {msg.get('method')}"},
+                    }
+                res.write_text(json.dumps(body))
+            time.sleep(0.01)
+
+    t = threading.Thread(target=host, daemon=True)
+    t.start()
+    try:
+        client = FileBridgeClient(str(tmp_path), token)
+        client.connect()
+        assert client.call("timeline_name") == "File Timeline"
+        client.close()
+    finally:
+        stop.set()
+        t.join(timeout=2)
 
 
 def test_concurrent_calls(bridge_pair):

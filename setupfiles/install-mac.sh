@@ -1,18 +1,18 @@
 #!/bin/bash
 # Captain installer for macOS.
-# Creates a virtualenv, installs dependencies, registers the launcher with
-# DaVinci Resolve, and records the install location for the launcher.
+# Creates a virtualenv, installs dependencies, and registers a single Scripts
+# menu entry (Captain.lua) — same pattern BadWords uses.
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DATA_DIR="$HOME/Library/Application Support/Captain"
 VENV_DIR="$APP_DIR/.venv"
-RESOLVE_SCRIPTS="$HOME/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"
+USER_SCRIPTS="$HOME/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"
+SYSTEM_SCRIPTS="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"
 
 echo "Captain installer"
 echo "App directory: $APP_DIR"
 
-# Pick a Python: prefer 3.11/3.12/3.13 (faster-whisper wheel coverage).
 PYTHON=""
 for candidate in python3.12 python3.13 python3.11 python3; do
     if command -v "$candidate" >/dev/null 2>&1; then
@@ -24,21 +24,38 @@ if [ -z "$PYTHON" ]; then
     echo "ERROR: No python3 found. Install Python 3.11+ (e.g. brew install python@3.12)."
     exit 1
 fi
-echo "Using Python: $PYTHON ($($PYTHON --version))"
+echo "Using Python for Captain app: $PYTHON ($($PYTHON --version))"
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
     echo "WARNING: ffmpeg not found on PATH. Install it with: brew install ffmpeg"
 fi
 
+echo
 echo "Creating virtualenv..."
 "$PYTHON" -m venv "$VENV_DIR"
 "$VENV_DIR/bin/pip" install --upgrade pip
 echo "Installing dependencies (this downloads ML libraries; may take a while)..."
 "$VENV_DIR/bin/pip" install -r "$APP_DIR/requirements.txt"
 
-echo "Registering launcher with DaVinci Resolve..."
-mkdir -p "$RESOLVE_SCRIPTS"
-cp "$APP_DIR/scripts/Captain.py" "$RESOLVE_SCRIPTS/Captain.py"
+echo
+echo "Registering Captain with DaVinci Resolve (Workspace → Scripts → Captain)..."
+mkdir -p "$USER_SCRIPTS"
+cp "$APP_DIR/scripts/Captain.lua" "$USER_SCRIPTS/Captain.lua"
+
+# One menu entry only — remove legacy probes / duplicates.
+rm -f "$USER_SCRIPTS/HelloCaptain.lua" \
+      "$USER_SCRIPTS/CaptainPython.py" \
+      "$USER_SCRIPTS/Captain.py"
+if [ -d "$SYSTEM_SCRIPTS" ]; then
+    rm -f "$SYSTEM_SCRIPTS/Captain.lua" \
+          "$SYSTEM_SCRIPTS/HelloCaptain.lua" \
+          "$SYSTEM_SCRIPTS/CaptainPython.py" \
+          "$SYSTEM_SCRIPTS/Captain.py" 2>/dev/null || \
+    sudo rm -f "$SYSTEM_SCRIPTS/Captain.lua" \
+               "$SYSTEM_SCRIPTS/HelloCaptain.lua" \
+               "$SYSTEM_SCRIPTS/CaptainPython.py" \
+               "$SYSTEM_SCRIPTS/Captain.py" 2>/dev/null || true
+fi
 
 mkdir -p "$DATA_DIR"
 cat > "$DATA_DIR/install.json" <<EOF
@@ -49,6 +66,11 @@ cat > "$DATA_DIR/install.json" <<EOF
 EOF
 
 echo
-echo "Done. In DaVinci Resolve: Workspace > Scripts > Captain"
-echo "Works on Resolve Free and Studio (IPC bridge keeps scripting in-process)."
-echo "(The first transcription downloads the Whisper model; later runs are fast.)"
+echo "Done."
+echo "  1. Fully quit and reopen DaVinci Resolve"
+echo "  2. Open a project"
+echo "  3. Workspace → Scripts → Captain"
+echo
+echo "Same launch path as BadWords: installer registers the Scripts menu wrapper;"
+echo "Resolve has no lower-friction Free plugin API than that."
+echo "(First transcription downloads the Whisper model; later runs are fast.)"

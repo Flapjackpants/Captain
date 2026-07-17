@@ -15,6 +15,7 @@ import secrets
 import socket
 import socketserver
 import threading
+import time
 import traceback
 from typing import Any, Callable
 
@@ -169,3 +170,86 @@ class BridgeClient:
                 if "error" in msg:
                     raise BridgeError(msg["error"].get("message", "Unknown bridge error"))
                 return msg.get("result")
+
+
+# ---- file transport (Lua Scripts host on Resolve Free) --------------------
+
+
+class FileBridgeClient:
+    """JSON request/response files in a directory (no sockets required).
+
+    Used when Workspace → Scripts runs ``Captain.lua``, which holds the live
+    ``resolve`` object and cannot easily host a TCP server in Lua.
+    """
+
+    def __init__(self, directory: str, token: str, timeout: float = 120.0):
+        from pathlib import Path
+
+        self.directory = Path(directory)
+        self.token = token
+        self.timeout = timeout
+        self._next_id = 1
+        self._lock = threading.Lock()
+        self._connected = False
+        self.request_path = self.directory / "request.json"
+        self.response_path = self.directory / "response.json"
+
+    def connect(self) -> None:
+        if not self.directory.is_dir():
+            raise BridgeError(f"Bridge directory missing: {self.directory}")
+        ready = self.directory / "ready.json"
+        deadline = time.time() + 15.0
+        while time.time() < deadline:
+            if ready.is_file():
+                break
+            time.sleep(0.05)
+        else:
+            raise BridgeError(
+                "Resolve Lua host did not become ready. "
+                "Run Workspace → Scripts → Captain and leave it open."
+            )
+        self._connected = True
+        self.call("auth", {"token": self.token})
+
+    def close(self) -> None:
+        self._connected = False
+
+    def call(self, method: str, params: dict | None = None) -> Any:
+        if not self._connected and method != "auth":
+            raise BridgeError("File bridge client is not connected")
+        with self._lock:
+            req_id = self._next_id
+            self._next_id += 1
+            if self.response_path.exists():
+                try:
+                    self.response_path.unlink()
+                except OSError:
+                    pass
+            payload = {"id": req_id, "method": method, "params": params or {}}
+            tmp = self.directory / "request.json.tmp"
+            tmp.write_text(json.dumps(payload))
+            tmp.replace(self.request_path)
+
+            deadline = time.time() + self.timeout
+            while time.time() < deadline:
+                if self.response_path.is_file():
+                    try:
+                        msg = json.loads(self.response_path.read_text())
+                    except (OSError, ValueError):
+                        time.sleep(0.02)
+                        continue
+                    if msg.get("id") != req_id:
+                        time.sleep(0.02)
+                        continue
+                    try:
+                        self.response_path.unlink()
+                    except OSError:
+                        pass
+                    if "error" in msg:
+                        raise BridgeError(
+                            msg["error"].get("message", "Unknown bridge error")
+                        )
+                    return msg.get("result")
+                time.sleep(0.02)
+            raise BridgeError(f"Timed out waiting for bridge method {method!r}")
+

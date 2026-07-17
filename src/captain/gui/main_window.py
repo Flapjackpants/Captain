@@ -167,14 +167,18 @@ class MainWindow(QMainWindow):
                 return
         try:
             self.clips = [c for c in self.resolve.list_clips() if c.file_path]
-        except ResolveError as e:
-            QMessageBox.warning(self, "Captain", str(e))
+        except Exception as e:
+            QMessageBox.warning(self, "Captain", f"Could not list clips:\n{e}")
             return
         self.clip_combo.clear()
         for c in self.clips:
             label = f"[{c.track_type[0].upper()}{c.track_index}] {c.name}"
             self.clip_combo.addItem(label)
-        self._status(f"{len(self.clips)} clips found in '{self.resolve.timeline_name()}'")
+        try:
+            tname = self.resolve.timeline_name()
+        except Exception:
+            tname = "(unknown)"
+        self._status(f"{len(self.clips)} clips found in '{tname}'")
 
     # ---- transcription ------------------------------------------------------
 

@@ -25,6 +25,8 @@ log = logging.getLogger("Captain.api")
 
 ENV_BRIDGE_URL = "CAPTAIN_BRIDGE_URL"
 ENV_BRIDGE_TOKEN = "CAPTAIN_BRIDGE_TOKEN"
+ENV_BRIDGE_MODE = "CAPTAIN_BRIDGE_MODE"  # "tcp" (default) | "file"
+ENV_BRIDGE_DIR = "CAPTAIN_BRIDGE_DIR"
 
 
 def _module_candidates() -> list[str]:
@@ -345,10 +347,8 @@ class ResolveHandler:
 class BridgedResolveHandler:
     """UI-side Resolve facade that talks to the Scripts-process bridge."""
 
-    def __init__(self, url: str, token: str) -> None:
-        from .bridge import BridgeClient
-
-        self._client = BridgeClient.from_url(url, token)
+    def __init__(self, client) -> None:
+        self._client = client
         self.mode = "bridge"
         self.resolve = None  # unused; kept for duck-typing
 
@@ -368,7 +368,10 @@ class BridgedResolveHandler:
 
     @property
     def connected(self) -> bool:
-        return self._client._sock is not None
+        sock = getattr(self._client, "_sock", None)
+        if sock is not None:
+            return True
+        return bool(getattr(self._client, "_connected", False))
 
     def version_string(self) -> str:
         return (self._client.call("ping") or {}).get("version", "unknown")
@@ -415,9 +418,19 @@ class BridgedResolveHandler:
 
 
 def create_resolve_handler() -> ResolveHandler | BridgedResolveHandler:
-    """Pick IPC bridge when env vars are set; otherwise direct scriptapp."""
-    url = os.environ.get(ENV_BRIDGE_URL)
+    """Pick file/TCP bridge when env vars are set; otherwise direct scriptapp."""
     token = os.environ.get(ENV_BRIDGE_TOKEN)
+    mode = (os.environ.get(ENV_BRIDGE_MODE) or "").lower()
+    if mode == "file" and token:
+        from .bridge import FileBridgeClient
+
+        directory = os.environ.get(ENV_BRIDGE_DIR)
+        if not directory:
+            raise ResolveError("CAPTAIN_BRIDGE_DIR is not set for file bridge mode.")
+        return BridgedResolveHandler(FileBridgeClient(directory, token))
+    url = os.environ.get(ENV_BRIDGE_URL)
     if url and token:
-        return BridgedResolveHandler(url, token)
+        from .bridge import BridgeClient
+
+        return BridgedResolveHandler(BridgeClient.from_url(url, token))
     return ResolveHandler()
