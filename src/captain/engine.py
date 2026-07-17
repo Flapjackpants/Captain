@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -15,9 +16,27 @@ log = logging.getLogger("Captain.engine")
 
 ProgressFn = Callable[[float, str], None]  # (fraction 0..1, message)
 
+# GUI apps launched from Resolve inherit a minimal PATH without Homebrew.
+_EXTRA_BIN_DIRS = (
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+)
+
+
+def _find_tool(name: str) -> str | None:
+    """Locate an executable on PATH or in common Homebrew locations."""
+    found = shutil.which(name)
+    if found:
+        return found
+    for directory in _EXTRA_BIN_DIRS:
+        candidate = Path(directory) / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
 
 def find_ffmpeg() -> str:
-    path = shutil.which("ffmpeg")
+    path = _find_tool("ffmpeg")
     if not path:
         raise RuntimeError(
             "FFmpeg not found on PATH. Install it (e.g. `brew install ffmpeg`) "
@@ -49,7 +68,7 @@ def extract_audio(
 
 
 def probe_duration(media_path: str) -> float:
-    ffprobe = shutil.which("ffprobe")
+    ffprobe = _find_tool("ffprobe")
     if not ffprobe:
         raise RuntimeError("ffprobe not found on PATH (comes with FFmpeg).")
     result = subprocess.run(
