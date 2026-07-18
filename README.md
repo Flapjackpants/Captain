@@ -1,98 +1,76 @@
 # Captain
 
-Text-based timeline editing for DaVinci Resolve, powered by local, offline AI.
+**Edit Resolve timelines like a document.**
 
-Captain transcribes a clip from your timeline with word-level timestamps
-(faster-whisper), lets you edit the audio like a document — delete words,
-cut/paste them around, auto-trim silence and repeated retakes — and then
-assembles a **new** timeline in Resolve with all your cuts applied. Your
-original timeline is never modified.
+Captain turns a clip into a word-level transcript, lets you delete, reorder, and
+auto-trim like you’re editing text, then applies those cuts back into DaVinci
+Resolve — replace in place, ripple, or a new timeline. Transcription runs
+locally with Whisper. Works on **Resolve Free and Studio**.
 
-Works on **Resolve Free and Studio**.
+## Why Us?
 
-## Launch model (same as BadWords)
-
-There is **no lower-friction Free plugin API** than Workspace → Scripts.
-[BadWords](https://github.com/veritus-git/BadWords) does the same thing: its
-installer drops a thin wrapper into
-`Fusion/Scripts/Utility/`, then you run **Workspace → Scripts → BadWords**
-after restarting Resolve. Captain mirrors that with a single **Captain** entry
-(`Captain.lua`) so it shows up on Free even without a python.org Python.
-
-Studio-only alternatives (Workflow Integrations / Electron) still open a
-separate window and do not remove the one-click Scripts step for Free users.
-
-## Requirements
-
-- DaVinci Resolve (**Free or Studio**) from
-  [blackmagicdesign.com](https://www.blackmagicdesign.com/products/davinciresolve/)
-  — **not** the Mac App Store build
-- Python 3.11–3.13 for the Captain app venv (Homebrew is fine)
-- FFmpeg on your PATH (`brew install ffmpeg`)
-- ~2 GB disk for the Whisper model (first transcription)
-
-You do **not** need the Studio “External scripting” preference.
+Video editing still forces you to scrub waveforms and guess where words start.
+Captain flips that: speak once, read the transcript, cut with the keyboard.
+Silence markers and retake detection handle manual cleanup that would've taken hours
+in seconds. Powered by local, offline Whisper AI, so you know your data never leaves your
+machine. 
 
 ## Install (macOS)
+
+**Requirements:** DaVinci Resolve Free or Studio (not the Mac App Store build),
+Python 3.11–3.13, FFmpeg on your PATH (`brew install ffmpeg`), ~2 GB for the
+Whisper model on first use.
 
 ```bash
 bash setupfiles/install-mac.sh
 ```
 
-Then **fully quit and reopen Resolve**, open a project, and run:
+Fully quit and reopen Resolve, open a project, then:
 
 **Workspace → Scripts → Captain**
 
-That one entry starts the Resolve bridge and opens the Captain window. Leave
-the script running until you quit Captain.
+Leave the script running until you quit Captain.
 
 ## Usage
 
 1. **Workspace → Scripts → Captain**
-2. Pick a clip (or **Use Playhead Clip**) → **Transcribe** → edit words → **Apply**
-3. Optional: **Import Script…** (`.txt` / `.fountain` / `.srt` / `.vtt`) to compare
+2. Pick a clip (or **Use Playhead Clip**) → **Transcribe** → edit → **Apply**
+3. Optional: **Import Script…** (`.txt` / `.fountain` / `.srt` / `.vtt`) to
+   color-compare against what was said
 
-Edit shortcuts: Delete removes, Cmd+X / Cmd+V cut-paste words, Cmd+Z / Cmd+Shift+Z
-undo/redo, click a word jumps the playhead. **Trim Silence** / **Remove
-Repeats** mark or apply auto-trims. With a script loaded, **Remove Repeats**
-also drops abandoned takes found via compare.
+**Edit:** Delete removes words (or toggles silence trim) · Cmd+X / Cmd+V
+cut-paste · Cmd+Z / Cmd+Shift+Z undo/redo · click jumps the playhead ·
+**Trim Silence** / **Remove Repeats** for auto-trims · silence markers (`…`)
+show long gaps; struck = will be trimmed.
 
-### Script compare colors
+**Script colors:** white = match · blue = in script only · magenta = in video
+only · red = mismatch · gray strikethrough = removed.
 
-| Color | Meaning |
+## Technical breakdown
+
+```
+Workspace → Scripts → Captain.lua   (Resolve Lua, live resolve handle)
+        │
+        ├─ JSON-RPC over files in
+        │  ~/Library/Application Support/Captain/bridge/
+        │
+        └─ spawns Captain UI (venv + PySide6 + faster-whisper)
+```
+
+| Layer | Role |
 | --- | --- |
-| White | Match (in script and video) |
-| Blue | In script, missing from video |
-| Magenta | In video, not in script |
-| Red | Mismatch / incorrect substitution |
-| Gray strikethrough | Removed by you |
+| **Captain.lua** | Resolve Scripts entry; owns the live `resolve` API and the bridge loop |
+| **Bridge** | File-based JSON-RPC between Lua and the Python UI |
+| **faster-whisper** | Offline transcription with word-level timestamps |
+| **Transcript model** | Ordered words, removed set, silence cuts; `keep_ranges()` drives assembly |
+| **GUI** | PySide6 transcript editor: lines, silence markers, search, script compare |
+| **Assemble** | Maps keep ranges to Resolve timeline ops (replace / ripple / new timeline) |
 
-Imported scripts are saved with the session and restored on reload. If a script
-is loaded before you transcribe, its vocabulary is passed to Whisper as an
-`initial_prompt` for better proper nouns and tech terms.
+Apply modes: **replace in place** (default, non-ripple), **replace with ripple**,
+or **new timeline** (`{clip} [Captain] {n}`).
 
-## How Free compatibility works
-
-```
-Workspace → Scripts → Captain.lua   (Resolve Lua, has live resolve)
-        │
-        ├─ file JSON-RPC in ~/Library/Application Support/Captain/bridge/
-        │
-        └─ spawns → Captain UI (venv + PySide6 + Whisper)
-```
-
-## Configuration
-
-`~/Library/Application Support/Captain/config.json`:
-
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `whisper_model` | `small` | `base`, `small`, `medium`, `large-v3` |
-| `whisper_device` | `auto` | `cpu`, `cuda`, or `auto` |
-| `language` | `null` | Force a language code, or autodetect |
-| `silence_min_duration` | `0.8` | Gaps ≥ this many seconds are trimmable |
-| `silence_max_pause` | `0.25` | Silence kept at each trimmed junction |
-| `repeat_max_ngram` | `8` | Longest repeated phrase length to detect |
+Config lives at `~/Library/Application Support/Captain/config.json`
+(Whisper model/device, language, silence thresholds, repeat n-gram size).
 
 ## Development
 
