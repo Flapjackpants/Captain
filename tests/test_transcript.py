@@ -309,3 +309,22 @@ def test_apply_mode_default():
     assert config.normalize_apply_mode("bogus") == "replace_in_place"
     assert config.normalize_apply_mode(None) == "replace_in_place"
 
+
+def test_transcript_typography_defaults():
+    from captain import config
+
+    assert config.DEFAULTS["transcript_font_family"] == ""
+    assert config.DEFAULTS["transcript_font_size"] == 14
+    assert config.DEFAULTS["transcript_word_spacing"] == 0
+    assert config.DEFAULTS["transcript_word_pad_x"] == 1
+    assert config.DEFAULTS["transcript_word_pad_y"] == 2
+    cfg = config.load_config()
+    for key in (
+        "transcript_font_family",
+        "transcript_font_size",
+        "transcript_word_spacing",
+        "transcript_word_pad_x",
+        "transcript_word_pad_y",
+    ):
+        assert key in cfg
+

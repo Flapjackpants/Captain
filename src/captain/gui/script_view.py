@@ -85,20 +85,35 @@ class ScriptModel(QAbstractListModel):
 
 
 class ScriptDelegate(QStyledItemDelegate):
-    PAD_X = 6
-    PAD_Y = 4
-
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.pad_x = 1
+        self.pad_y = 2
         self.font = QFont()
         self.font.setPointSize(14)
+
+    def apply_typography(
+        self,
+        *,
+        family: str = "",
+        size: int = 14,
+        pad_x: int = 1,
+        pad_y: int = 2,
+    ) -> None:
+        self.pad_x = max(0, int(pad_x))
+        self.pad_y = max(0, int(pad_y))
+        font = QFont()
+        if family:
+            font.setFamily(family)
+        font.setPointSize(max(8, int(size)))
+        self.font = font
 
     def sizeHint(self, option, index) -> QSize:
         fm = QFontMetrics(self.font)
         text = index.data(Qt.ItemDataRole.DisplayRole) or ""
         return QSize(
-            fm.horizontalAdvance(text) + self.PAD_X * 2,
-            fm.height() + self.PAD_Y * 2,
+            fm.horizontalAdvance(text) + self.pad_x * 2,
+            fm.height() + self.pad_y * 2,
         )
 
     def paint(self, painter: QPainter, option, index) -> None:
@@ -125,7 +140,7 @@ class ScriptDelegate(QStyledItemDelegate):
 
         painter.setPen(QPen(color))
         text = index.data(Qt.ItemDataRole.DisplayRole) or ""
-        text_rect = rect.adjusted(self.PAD_X, self.PAD_Y, -self.PAD_X, -self.PAD_Y)
+        text_rect = rect.adjusted(self.pad_x, self.pad_y, -self.pad_x, -self.pad_y)
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, text)
         painter.restore()
 
@@ -139,15 +154,38 @@ class ScriptView(QListView):
         super().__init__(parent)
         self._model = ScriptModel(self)
         self.setModel(self._model)
-        self.setItemDelegate(ScriptDelegate(self))
+        self._delegate = ScriptDelegate(self)
+        self.setItemDelegate(self._delegate)
         self.setFlow(QListView.Flow.LeftToRight)
         self.setWrapping(True)
         self.setResizeMode(QListView.ResizeMode.Adjust)
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
-        self.setSpacing(2)
+        self.setSpacing(0)
         self.setUniformItemSizes(False)
         self.setObjectName("transcript")  # reuse editor chrome from theme
         self.clicked.connect(self._on_click)
+
+    def apply_typography(
+        self,
+        *,
+        family: str = "",
+        size: int = 14,
+        spacing: int = 0,
+        pad_x: int = 1,
+        pad_y: int = 2,
+    ) -> None:
+        self._delegate.apply_typography(
+            family=family, size=size, pad_x=pad_x, pad_y=pad_y
+        )
+        self.setSpacing(max(0, int(spacing)))
+        if self._model.rowCount():
+            top = self._model.index(0)
+            bottom = self._model.index(self._model.rowCount() - 1)
+            self._model.dataChanged.emit(
+                top, bottom, [Qt.ItemDataRole.SizeHintRole, Qt.ItemDataRole.DisplayRole]
+            )
+        self.viewport().update()
+        self.doItemsLayout()
 
     def set_script(
         self,

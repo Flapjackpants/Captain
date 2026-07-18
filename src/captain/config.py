@@ -24,6 +24,12 @@ DEFAULTS: dict[str, Any] = {
     "new_timeline_suffix": " [Captain]",
     # "replace_in_place" (non-ripple) | "replace_ripple" | "new_timeline"
     "apply_mode": "replace_in_place",
+    # Transcript / script typography
+    "transcript_font_family": "",  # empty = Qt default
+    "transcript_font_size": 14,
+    "transcript_word_spacing": 0,
+    "transcript_word_pad_x": 1,
+    "transcript_word_pad_y": 2,
 }
 
 APPLY_MODES = frozenset({"replace_in_place", "replace_ripple", "new_timeline"})

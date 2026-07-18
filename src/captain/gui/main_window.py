@@ -43,6 +43,7 @@ from ..compare import (
 from ..engine import Transcriber, extract_audio
 from ..transcript import Transcript, find_repeats, find_silence_gaps
 from .script_view import ScriptView
+from .settings_dialog import SettingsDialog
 from .transcript_view import TranscriptView
 
 log = logging.getLogger("Captain.gui")
@@ -142,6 +143,7 @@ class MainWindow(QMainWindow):
         self.clip_combo = QComboBox()
         self.clip_combo.setMinimumWidth(240)
         self.clip_combo.setToolTip("Fallback: pick any clip from the current timeline")
+        self.clip_combo.currentIndexChanged.connect(self._on_clip_combo_changed)
         self.transcribe_btn = QPushButton("Transcribe")
         self.transcribe_btn.clicked.connect(self._transcribe)
         self.refresh_btn = QPushButton("Refresh")
@@ -154,12 +156,16 @@ class MainWindow(QMainWindow):
         self.clear_script_btn = QPushButton("Clear Script")
         self.clear_script_btn.clicked.connect(self._clear_script)
         self.clear_script_btn.setVisible(False)
+        self.settings_btn = QPushButton("Settings…")
+        self.settings_btn.setToolTip("Transcript font, size, and spacing")
+        self.settings_btn.clicked.connect(self._open_settings)
         top.addWidget(self.playhead_btn)
         top.addWidget(self.clip_combo, stretch=1)
         top.addWidget(self.transcribe_btn)
         top.addWidget(self.refresh_btn)
         top.addWidget(self.import_script_btn)
         top.addWidget(self.clear_script_btn)
+        top.addWidget(self.settings_btn)
         layout.addLayout(top)
 
         search_row = QHBoxLayout()
@@ -206,6 +212,7 @@ class MainWindow(QMainWindow):
 
         self.script_view = ScriptView()
         self.script_view.token_activated.connect(self._on_script_token)
+        self._apply_typography_from_cfg()
         self.script_panel = QWidget()
         script_layout = QVBoxLayout(self.script_panel)
         script_layout.setContentsMargins(0, 0, 0, 0)
@@ -366,32 +373,58 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Captain", f"Could not list clips:\n{e}")
             return
         prev_id = self.current_clip.clip_id if self.current_clip else None
+        self.clip_combo.blockSignals(True)
         self.clip_combo.clear()
         for c in self.clips:
             label = f"[{c.track_type[0].upper()}{c.track_index}] {c.name}"
-            self.clip_combo.addItem(label)
+            self.clip_combo.addItem(label, c.clip_id)
         if prev_id:
             for i, c in enumerate(self.clips):
                 if c.clip_id == prev_id:
                     self.clip_combo.setCurrentIndex(i)
                     break
+        self.clip_combo.blockSignals(False)
         try:
             tname = self.resolve.timeline_name()
         except Exception:
             tname = "(unknown)"
         self._status(f"{len(self.clips)} clips found in '{tname}'")
 
-    def _select_clip_in_combo(self, clip: ClipInfo) -> None:
+    def _clip_label(self, clip: ClipInfo) -> str:
+        return f"[{clip.track_type[0].upper()}{clip.track_index}] {clip.name}"
+
+    def _find_clip_index(self, clip: ClipInfo) -> int:
+        """Index in self.clips matching clip_id, else timeline/source/track."""
         for i, c in enumerate(self.clips):
             if c.clip_id == clip.clip_id:
-                self.clip_combo.setCurrentIndex(i)
-                return
-        # Not in list (e.g. filtered); keep current_clip separately and show label.
-        self.clips.append(clip)
-        self.clip_combo.addItem(
-            f"[{clip.track_type[0].upper()}{clip.track_index}] {clip.name}"
-        )
-        self.clip_combo.setCurrentIndex(self.clip_combo.count() - 1)
+                return i
+        for i, c in enumerate(self.clips):
+            if (
+                c.track_type == clip.track_type
+                and c.timeline_start_frame == clip.timeline_start_frame
+                and c.source_start_frame == clip.source_start_frame
+            ):
+                return i
+        return -1
+
+    def _select_clip_in_combo(self, clip: ClipInfo) -> None:
+        idx = self._find_clip_index(clip)
+        self.clip_combo.blockSignals(True)
+        if idx >= 0:
+            # Prefer the listed clip object so combo data stays consistent.
+            self.current_clip = self.clips[idx]
+            self.clip_combo.setCurrentIndex(idx)
+        else:
+            self.clips.append(clip)
+            self.current_clip = clip
+            self.clip_combo.addItem(self._clip_label(clip), clip.clip_id)
+            self.clip_combo.setCurrentIndex(self.clip_combo.count() - 1)
+        self.clip_combo.blockSignals(False)
+
+    def _on_clip_combo_changed(self, index: int) -> None:
+        if index < 0 or index >= len(self.clips):
+            return
+        self.current_clip = self.clips[index]
 
     def _use_playhead_clip(self) -> None:
         if not self.resolve.connected:
@@ -408,9 +441,29 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Captain", f"Could not read playhead clip:\n{e}")
             return
-        self.current_clip = clip
         self._select_clip_in_combo(clip)
-        self._status(f"Using playhead clip: {clip.name}")
+        name = self.current_clip.name if self.current_clip else clip.name
+        self._status(f"Using playhead clip: {name}")
+
+    def _apply_typography_from_cfg(self) -> None:
+        kwargs = dict(
+            family=str(self.cfg.get("transcript_font_family") or ""),
+            size=int(self.cfg.get("transcript_font_size", 14)),
+            spacing=int(self.cfg.get("transcript_word_spacing", 0)),
+            pad_x=int(self.cfg.get("transcript_word_pad_x", 1)),
+            pad_y=int(self.cfg.get("transcript_word_pad_y", 2)),
+        )
+        self.view.apply_typography(**kwargs)
+        self.script_view.apply_typography(**kwargs)
+
+    def _open_settings(self) -> None:
+        dlg = SettingsDialog(self.cfg, self)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        self.cfg.update(dlg.values())
+        config.save_config(self.cfg)
+        self._apply_typography_from_cfg()
+        self._status("Settings saved")
 
     # ---- transcription ------------------------------------------------------
 
@@ -500,6 +553,7 @@ class MainWindow(QMainWindow):
             self.cfg["silence_min_duration"],
             self.cfg["silence_max_pause"],
         )
+        self._apply_typography_from_cfg()
         self.view.set_transcript(transcript)
         self._set_editing_enabled(True)
         if transcript.script_text:
