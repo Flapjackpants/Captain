@@ -196,6 +196,10 @@ class MainWindow(QMainWindow):
 
         self.view = TranscriptView()
         self.view.setObjectName("transcript")
+        self.view.set_silence_thresholds(
+            self.cfg["silence_min_duration"],
+            self.cfg["silence_max_pause"],
+        )
         self.view.edited.connect(self._on_edited)
         self.view.word_activated.connect(self._on_transcript_word)
         self.view.time_activated.connect(self._jump_to_media_second)
@@ -222,10 +226,11 @@ class MainWindow(QMainWindow):
         hint = QLabel(
             "Select words, then: Delete removes • Cmd/Ctrl+X cuts • "
             "Cmd/Ctrl+V pastes • Cmd/Ctrl+Z undo • Cmd/Ctrl+Shift+Z redo • "
-            "click a word/timecode jumps the playhead • Trim Silence shows "
-            "··· markers (Delete a marker to keep that silence) • Cmd/Ctrl+F search • "
-            "Import Script for color compare (white=match, blue=missing, "
-            "magenta=extra, red=mismatch, gray=removed)"
+            "click a word/timecode/silence jumps the playhead • "
+            "silence markers (…) show long gaps; struck = will be trimmed; "
+            "Delete toggles trim vs keep • Trim Silence marks all gaps • "
+            "Cmd/Ctrl+F search • Import Script for color compare "
+            "(white=match, blue=missing, magenta=extra, red=mismatch, gray=removed)"
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -491,6 +496,10 @@ class MainWindow(QMainWindow):
         clip = self.current_clip
         if clip is not None:
             self.view.set_timeline_context(clip.timeline_start_frame, clip.fps)
+        self.view.set_silence_thresholds(
+            self.cfg["silence_min_duration"],
+            self.cfg["silence_max_pause"],
+        )
         self.view.set_transcript(transcript)
         self._set_editing_enabled(True)
         if transcript.script_text:
@@ -615,7 +624,7 @@ class MainWindow(QMainWindow):
         total = sum(e - s for s, e in cuts)
         self._status(
             f"Marked {len(cuts)} silence gaps ({total:.1f}s) — "
-            "Delete a ··· marker to keep that silence"
+            "struck markers will be trimmed; Delete toggles keep"
         )
 
     def _trim_repeats(self) -> None:

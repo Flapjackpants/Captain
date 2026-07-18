@@ -1,6 +1,15 @@
 import pytest
 
-from captain.transcript import Transcript, Word, find_repeats, find_silence_gaps
+from captain.transcript import (
+    Transcript,
+    Word,
+    cuts_in_gap,
+    find_repeats,
+    find_silence_gaps,
+    gap_is_trimmed,
+    shrink_silence_cut,
+    silence_period_count,
+)
 
 
 def make_transcript(texts, gap=0.1, word_len=0.4, tail=0.5):
@@ -152,6 +161,53 @@ def test_edit_history_undo_redo():
     hist.push(snapshot_transcript(tr))
     tr.silence_cuts = [(0.1, 0.2)]
     assert not hist.can_redo()
+
+
+def test_silence_period_count_scales():
+    assert silence_period_count(0.0) == 3
+    assert silence_period_count(0.8) == 3  # round(0.8/0.4)=2 → clamp to 3
+    assert silence_period_count(1.2) == 3
+    assert silence_period_count(2.0) == 5
+    assert silence_period_count(10.0) == 12  # clamp max
+
+
+def test_gap_always_visible_trimmed_only_with_cut():
+    tr = make_transcript(["a", "b"], gap=2.0)
+    gap_start, gap_end = tr.words[0].end, tr.words[1].start
+    assert gap_end - gap_start >= 1.0
+    assert not gap_is_trimmed(gap_start, gap_end, [])
+    cuts = find_silence_gaps(tr, min_duration=1.0, max_pause=0.25)
+    assert gap_is_trimmed(gap_start, gap_end, cuts)
+    # Midpoint matching: only cuts for this gap
+    in_gap = cuts_in_gap(cuts, gap_start, gap_end)
+    assert in_gap
+    assert all(gap_start <= (c[0] + c[1]) / 2 <= gap_end for c in in_gap)
+
+
+def test_silence_delete_toggles_cut_membership():
+    """Delete on a marker: untrimmed → add shrunk cut; trimmed → remove cut."""
+    tr = make_transcript(["a", "b"], gap=2.0)
+    gap_start, gap_end = tr.words[0].end, tr.words[1].start
+    max_pause = 0.25
+    assert not gap_is_trimmed(gap_start, gap_end, tr.silence_cuts)
+
+    cut = shrink_silence_cut(gap_start, gap_end, max_pause)
+    assert cut is not None
+    tr.silence_cuts = [cut]
+    assert gap_is_trimmed(gap_start, gap_end, tr.silence_cuts)
+
+    # Toggle off: remove cuts in gap
+    drop = {(round(c[0], 4), round(c[1], 4)) for c in cuts_in_gap(tr.silence_cuts, gap_start, gap_end)}
+    tr.silence_cuts = [
+        c for c in tr.silence_cuts if (round(c[0], 4), round(c[1], 4)) not in drop
+    ]
+    assert not gap_is_trimmed(gap_start, gap_end, tr.silence_cuts)
+
+    # Toggle on again
+    again = shrink_silence_cut(gap_start, gap_end, max_pause)
+    assert again == cut
+    tr.silence_cuts = [again]
+    assert gap_is_trimmed(gap_start, gap_end, tr.silence_cuts)
 
 
 def test_silence_cut_restore_by_removing_cut():

@@ -255,11 +255,56 @@ def find_silence_gaps(
     if words:
         boundaries.append((words[-1].end, transcript.duration))
     for gap_start, gap_end in boundaries:
-        if gap_end - gap_start >= min_duration:
-            cs, ce = gap_start + max_pause, gap_end - max_pause
-            if ce - cs > 1e-3:
-                cuts.append((cs, ce))
+        cut = shrink_silence_cut(gap_start, gap_end, max_pause)
+        if cut is not None and gap_end - gap_start >= min_duration:
+            cuts.append(cut)
     return cuts
+
+
+def shrink_silence_cut(
+    gap_start: float, gap_end: float, max_pause: float
+) -> tuple[float, float] | None:
+    """Return the excised interior of a gap, retaining max_pause on each side."""
+    cs, ce = gap_start + max_pause, gap_end - max_pause
+    if ce - cs <= 1e-3:
+        return None
+    return (cs, ce)
+
+
+def silence_period_count(duration: float, *, seconds_per_dot: float = 0.4) -> int:
+    """How many '.' characters to show for a silence of the given length."""
+    if duration <= 0:
+        return 3
+    return max(3, min(12, int(round(duration / seconds_per_dot))))
+
+
+def gap_is_trimmed(
+    gap_start: float,
+    gap_end: float,
+    silence_cuts: list[tuple[float, float]],
+) -> bool:
+    """True if any silence_cut's midpoint lies inside the natural gap."""
+    for cs, ce in silence_cuts:
+        if ce <= gap_start or cs >= gap_end:
+            continue
+        mid = (cs + ce) / 2.0
+        if gap_start - 1e-6 <= mid <= gap_end + 1e-6:
+            return True
+    return False
+
+
+def cuts_in_gap(
+    cuts: list[tuple[float, float]], gap_start: float, gap_end: float
+) -> list[tuple[float, float]]:
+    """Return silence cuts whose midpoint falls in [gap_start, gap_end]."""
+    out: list[tuple[float, float]] = []
+    for cs, ce in cuts:
+        if ce <= gap_start or cs >= gap_end:
+            continue
+        mid = (cs + ce) / 2.0
+        if gap_start - 1e-6 <= mid <= gap_end + 1e-6:
+            out.append((cs, ce))
+    return out
 
 
 def find_repeats(

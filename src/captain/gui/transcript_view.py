@@ -1,9 +1,10 @@
 """Line-aware transcript editor widget.
 
 Words render as a wrapping flow grouped into lines. Each line starts with a
-timeline-timecode gutter. Trimmed silence gaps appear as dim markers you can
-delete to restore. Selection, Delete/Backspace, cut/paste, single-click to
-jump the Resolve playhead. Search highlights matching words.
+timeline-timecode gutter. Natural silence gaps (>= min duration) appear as
+period markers (more dots = longer). After Trim Silence / Delete, trimmed
+gaps are gray and struck through like removed words. Selection, cut/paste,
+single-click to jump the Resolve playhead. Search highlights matching words.
 """
 
 from __future__ import annotations
@@ -23,8 +24,12 @@ from ..transcript import (
     Transcript,
     TranscriptLine,
     apply_snapshot,
+    cuts_in_gap,
     frame_to_timecode,
+    gap_is_trimmed,
     media_sec_to_timeline_frame,
+    shrink_silence_cut,
+    silence_period_count,
     snapshot_transcript,
 )
 from .theme import (
@@ -38,27 +43,12 @@ WORD_ROLE = Qt.ItemDataRole.UserRole + 1  # -> (word_index, removed: bool)
 KIND_ROLE = Qt.ItemDataRole.UserRole + 2  # "line" | "word" | "silence"
 LINE_ROLE = Qt.ItemDataRole.UserRole + 3  # TranscriptLine
 MATCH_ROLE = Qt.ItemDataRole.UserRole + 4  # bool
-SILENCE_ROLE = Qt.ItemDataRole.UserRole + 5  # (start, end) seconds
+SILENCE_ROLE = Qt.ItemDataRole.UserRole + 5  # (start, end, trimmed)
 STATUS_ROLE = Qt.ItemDataRole.UserRole + 6  # compare status: match|mismatch|extra|None
 
 
-def _cuts_in_gap(
-    cuts: list[tuple[float, float]], gap_start: float, gap_end: float
-) -> list[tuple[float, float]]:
-    """Return silence cuts that fall primarily in [gap_start, gap_end]."""
-    out: list[tuple[float, float]] = []
-    for cs, ce in cuts:
-        if ce <= gap_start or cs >= gap_end:
-            continue
-        # Prefer cuts whose midpoint sits in the gap (avoids double-insert).
-        mid = (cs + ce) / 2.0
-        if gap_start - 1e-6 <= mid <= gap_end + 1e-6:
-            out.append((cs, ce))
-    return out
-
-
 class TranscriptModel(QAbstractListModel):
-    """Flat model: line headers, words, and silence-cut markers."""
+    """Flat model: line headers, words, and silence gap markers."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -69,6 +59,14 @@ class TranscriptModel(QAbstractListModel):
         self._timeline_start_frame: int = 0
         self._fps: float = 24.0
         self._viewport_width: int = 400
+        self._silence_min_duration: float = 0.8
+        self._silence_max_pause: float = 0.25
+
+    def set_silence_thresholds(self, min_duration: float, max_pause: float) -> None:
+        self._silence_min_duration = float(min_duration)
+        self._silence_max_pause = float(max_pause)
+        if self.transcript is not None:
+            self.refresh()
 
     def set_timeline_context(self, timeline_start_frame: int, fps: float) -> None:
         self._timeline_start_frame = timeline_start_frame
@@ -121,8 +119,10 @@ class TranscriptModel(QAbstractListModel):
 
     def _append_silence_in_gap(self, gap_start: float, gap_end: float) -> None:
         assert self.transcript is not None
-        for cut in _cuts_in_gap(self.transcript.silence_cuts, gap_start, gap_end):
-            self._rows.append(("silence", cut))
+        if gap_end - gap_start < self._silence_min_duration:
+            return
+        trimmed = gap_is_trimmed(gap_start, gap_end, self.transcript.silence_cuts)
+        self._rows.append(("silence", (gap_start, gap_end, trimmed)))
 
     def _rebuild_rows(self) -> None:
         self._rows = []
@@ -131,8 +131,8 @@ class TranscriptModel(QAbstractListModel):
         tr = self.transcript
         order = tr.order
         if not order:
-            for cut in sorted(tr.silence_cuts):
-                self._rows.append(("silence", cut))
+            if tr.duration >= self._silence_min_duration:
+                self._append_silence_in_gap(0.0, tr.duration)
             return
 
         line_starts = {line.word_indices[0] for line in tr.lines() if line.word_indices}
@@ -172,9 +172,17 @@ class TranscriptModel(QAbstractListModel):
             return None
         kind, payload = self._rows[row]
         if kind == "silence":
-            cs, ce = payload  # type: ignore[misc]
+            cs, ce, _trimmed = payload  # type: ignore[misc]
             return float(cs), float(ce)
         return None
+
+    def silence_trimmed(self, row: int) -> bool:
+        if row < 0 or row >= len(self._rows):
+            return False
+        kind, payload = self._rows[row]
+        if kind == "silence":
+            return bool(payload[2])  # type: ignore[index]
+        return False
 
     def media_second_at_row(self, row: int) -> float | None:
         if self.transcript is None or row < 0 or row >= len(self._rows):
@@ -186,7 +194,7 @@ class TranscriptModel(QAbstractListModel):
             line: TranscriptLine = payload  # type: ignore[assignment]
             return line.start
         if kind == "silence":
-            cs, _ce = payload  # type: ignore[misc]
+            cs, _ce, _t = payload  # type: ignore[misc]
             return float(cs)
         return None
 
@@ -218,17 +226,20 @@ class TranscriptModel(QAbstractListModel):
             return None
 
         if kind == "silence":
-            cs, ce = payload  # type: ignore[misc]
+            cs, ce, trimmed = payload  # type: ignore[misc]
             dur = max(0.0, float(ce) - float(cs))
             if role == SILENCE_ROLE:
-                return (float(cs), float(ce))
+                return (float(cs), float(ce), bool(trimmed))
             if role == Qt.ItemDataRole.DisplayRole:
-                # Visual “space” for a trimmed gap; duration in tooltip.
-                return "  ···  "
+                return "." * silence_period_count(dur)
             if role == Qt.ItemDataRole.ToolTipRole:
+                if trimmed:
+                    return (
+                        f"Silence {dur:.1f}s (will be trimmed). "
+                        "Delete to keep this silence."
+                    )
                 return (
-                    f"Silence {dur:.1f}s (will be trimmed). "
-                    "Delete to keep this silence."
+                    f"Silence {dur:.1f}s. Delete to trim, or use Trim Silence."
                 )
             return None
 
@@ -309,15 +320,25 @@ class WordDelegate(QStyledItemDelegate):
         if kind == "silence":
             painter.setFont(self.font)
             text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+            silence = index.data(SILENCE_ROLE) or (0.0, 0.0, False)
+            trimmed = bool(silence[2])
             if option.state & QStyle.StateFlag.State_Selected:
                 painter.fillRect(rect, option.palette.highlight())
                 color = option.palette.highlightedText().color()
+            elif trimmed:
+                color = QColor(COMPARE_REMOVED)
             else:
                 painter.fillRect(rect, QColor(60, 60, 70, 80))
                 color = QColor(135, 135, 143)
             painter.setPen(QPen(color))
             text_rect = rect.adjusted(self.PAD_X, self.PAD_Y, -self.PAD_X, -self.PAD_Y)
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, text)
+            if trimmed:
+                fm = QFontMetrics(self.font)
+                width = fm.horizontalAdvance(text)
+                y = rect.center().y()
+                x0 = rect.center().x() - width // 2
+                painter.drawLine(x0, y, x0 + width, y)
             painter.restore()
             return
 
@@ -387,6 +408,9 @@ class TranscriptView(QListView):
         self._history.clear()
         self._model.set_transcript(transcript)
 
+    def set_silence_thresholds(self, min_duration: float, max_pause: float) -> None:
+        self._model.set_silence_thresholds(min_duration, max_pause)
+
     def set_timeline_context(self, timeline_start_frame: int, fps: float) -> None:
         self._model.set_timeline_context(timeline_start_frame, fps)
 
@@ -434,13 +458,14 @@ class TranscriptView(QListView):
                 out.append(widx)
         return out
 
-    def _selected_silence_cuts(self) -> list[tuple[float, float]]:
+    def _selected_silence_gaps(self) -> list[tuple[float, float, bool]]:
         rows = sorted(i.row() for i in self.selectionModel().selectedIndexes())
-        out: list[tuple[float, float]] = []
+        out: list[tuple[float, float, bool]] = []
         for r in rows:
-            cut = self._model.silence_range(r)
-            if cut is not None:
-                out.append(cut)
+            data = self._model.data(self._model.index(r), SILENCE_ROLE)
+            if data is not None:
+                cs, ce, trimmed = data
+                out.append((float(cs), float(ce), bool(trimmed)))
         return out
 
     def push_history(self) -> None:
@@ -475,19 +500,36 @@ class TranscriptView(QListView):
         if self.transcript is None:
             return
         words = self._selected_word_indices()
-        silences = self._selected_silence_cuts()
+        silences = self._selected_silence_gaps()
         if not words and not silences:
             return
         self.push_history()
         if words:
             self.transcript.delete(words)
         if silences:
-            # Deleting a silence marker restores that gap (removes the cut).
-            remove_keys = {(round(s, 4), round(e, 4)) for s, e in silences}
-            self.transcript.silence_cuts = [
-                c for c in self.transcript.silence_cuts
-                if (round(c[0], 4), round(c[1], 4)) not in remove_keys
-            ]
+            max_pause = self._model._silence_max_pause
+            cuts = list(self.transcript.silence_cuts)
+            for gap_start, gap_end, trimmed in silences:
+                if trimmed:
+                    # Restore: drop cuts whose midpoint is in this gap.
+                    drop = {
+                        (round(c[0], 4), round(c[1], 4))
+                        for c in cuts_in_gap(cuts, gap_start, gap_end)
+                    }
+                    cuts = [
+                        c for c in cuts
+                        if (round(c[0], 4), round(c[1], 4)) not in drop
+                    ]
+                else:
+                    # Trim: add shrunk cut matching Trim Silence.
+                    cut = shrink_silence_cut(gap_start, gap_end, max_pause)
+                    if cut is not None:
+                        key = (round(cut[0], 4), round(cut[1], 4))
+                        if not any(
+                            (round(c[0], 4), round(c[1], 4)) == key for c in cuts
+                        ):
+                            cuts.append(cut)
+            self.transcript.silence_cuts = sorted(cuts)
         self._model.refresh()
         self.edited.emit()
 
