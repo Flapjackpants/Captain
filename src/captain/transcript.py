@@ -49,6 +49,7 @@ class Transcript:
     order: list[int] = field(default_factory=list)
     removed: set[int] = field(default_factory=set)
     silence_cuts: list[tuple[float, float]] = field(default_factory=list)
+    script_text: str = ""  # raw imported script (Phase 2); alignment recomputed on load
 
     def __post_init__(self) -> None:
         if not self.order:
@@ -199,6 +200,7 @@ class Transcript:
                 "order": self.order,
                 "removed": sorted(self.removed),
                 "silence_cuts": self.silence_cuts,
+                "script_text": self.script_text,
             },
             indent=2,
         )
@@ -223,6 +225,7 @@ class Transcript:
             order=d.get("order") or [w.index for w in words],
             removed=set(d.get("removed", [])),
             silence_cuts=[tuple(c) for c in d.get("silence_cuts", [])],
+            script_text=d.get("script_text", "") or "",
         )
 
     def save(self, path: Path) -> None:

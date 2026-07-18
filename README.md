@@ -49,11 +49,27 @@ the script running until you quit Captain.
 ## Usage
 
 1. **Workspace → Scripts → Captain**
-2. Pick a clip → **Transcribe** → edit words → **Apply → New Timeline**
+2. Pick a clip (or **Use Playhead Clip**) → **Transcribe** → edit words → **Apply**
+3. Optional: **Import Script…** (`.txt` / `.fountain` / `.srt` / `.vtt`) to compare
 
-Edit shortcuts: Delete removes, Cmd+X / Cmd+V cut-paste words, Cmd+Z restores
-selection, double-click jumps the playhead. **Trim Silence** / **Remove
-Repeats** mark or apply auto-trims.
+Edit shortcuts: Delete removes, Cmd+X / Cmd+V cut-paste words, Cmd+Z / Cmd+Shift+Z
+undo/redo, click a word jumps the playhead. **Trim Silence** / **Remove
+Repeats** mark or apply auto-trims. With a script loaded, **Remove Repeats**
+also drops abandoned takes found via compare.
+
+### Script compare colors
+
+| Color | Meaning |
+| --- | --- |
+| White | Match (in script and video) |
+| Blue | In script, missing from video |
+| Magenta | In video, not in script |
+| Red | Mismatch / incorrect substitution |
+| Gray strikethrough | Removed by you |
+
+Imported scripts are saved with the session and restored on reload. If a script
+is loaded before you transcribe, its vocabulary is passed to Whisper as an
+`initial_prompt` for better proper nouns and tech terms.
 
 ## How Free compatibility works
 

@@ -27,12 +27,19 @@ from ..transcript import (
     media_sec_to_timeline_frame,
     snapshot_transcript,
 )
+from .theme import (
+    COMPARE_EXTRA,
+    COMPARE_MATCH,
+    COMPARE_MISMATCH,
+    COMPARE_REMOVED,
+)
 
 WORD_ROLE = Qt.ItemDataRole.UserRole + 1  # -> (word_index, removed: bool)
 KIND_ROLE = Qt.ItemDataRole.UserRole + 2  # "line" | "word" | "silence"
 LINE_ROLE = Qt.ItemDataRole.UserRole + 3  # TranscriptLine
 MATCH_ROLE = Qt.ItemDataRole.UserRole + 4  # bool
 SILENCE_ROLE = Qt.ItemDataRole.UserRole + 5  # (start, end) seconds
+STATUS_ROLE = Qt.ItemDataRole.UserRole + 6  # compare status: match|mismatch|extra|None
 
 
 def _cuts_in_gap(
@@ -58,6 +65,7 @@ class TranscriptModel(QAbstractListModel):
         self.transcript: Transcript | None = None
         self._rows: list[tuple[str, object]] = []
         self._match_words: set[int] = set()
+        self._compare_statuses: dict[int, str] = {}
         self._timeline_start_frame: int = 0
         self._fps: float = 24.0
         self._viewport_width: int = 400
@@ -82,6 +90,7 @@ class TranscriptModel(QAbstractListModel):
         self.beginResetModel()
         self.transcript = transcript
         self._match_words.clear()
+        self._compare_statuses.clear()
         self._rebuild_rows()
         self.endResetModel()
 
@@ -94,6 +103,16 @@ class TranscriptModel(QAbstractListModel):
 
     def clear_matches(self) -> None:
         self.set_matches([])
+
+    def set_compare_statuses(self, statuses: dict[int, str]) -> None:
+        self._compare_statuses = dict(statuses)
+        if self.rowCount():
+            top = self.index(0)
+            bottom = self.index(self.rowCount() - 1)
+            self.dataChanged.emit(top, bottom, [STATUS_ROLE])
+
+    def clear_compare_statuses(self) -> None:
+        self.set_compare_statuses({})
 
     def refresh(self) -> None:
         self.beginResetModel()
@@ -221,12 +240,22 @@ class TranscriptModel(QAbstractListModel):
             return (widx, widx in self.transcript.removed)
         if role == MATCH_ROLE:
             return widx in self._match_words
+        if role == STATUS_ROLE:
+            return self._compare_statuses.get(widx)
         if role == Qt.ItemDataRole.ToolTipRole:
             frame = media_sec_to_timeline_frame(
                 word.start, self._timeline_start_frame, self._fps
             )
             tc = frame_to_timecode(frame, self._fps)
-            return f"{tc}  ({word.start:.2f}s – {word.end:.2f}s)"
+            status = self._compare_statuses.get(widx)
+            tip = f"{tc}  ({word.start:.2f}s – {word.end:.2f}s)"
+            if status == "extra":
+                tip += " — in video, not in script"
+            elif status == "mismatch":
+                tip += " — differs from script"
+            elif status == "match":
+                tip += " — matches script"
+            return tip
         return None
 
 
@@ -295,6 +324,7 @@ class WordDelegate(QStyledItemDelegate):
         painter.setFont(self.font)
         _widx, removed = index.data(WORD_ROLE)
         is_match = bool(index.data(MATCH_ROLE))
+        compare_status = index.data(STATUS_ROLE)
 
         if option.state & QStyle.StateFlag.State_Selected:
             painter.fillRect(rect, option.palette.highlight())
@@ -302,9 +332,15 @@ class WordDelegate(QStyledItemDelegate):
             painter.fillRect(rect, QColor(230, 75, 61, 60))
 
         if removed:
-            color = QColor(128, 128, 128)
+            color = QColor(COMPARE_REMOVED)
         elif option.state & QStyle.StateFlag.State_Selected:
             color = option.palette.highlightedText().color()
+        elif compare_status == "extra":
+            color = QColor(COMPARE_EXTRA)
+        elif compare_status == "mismatch":
+            color = QColor(COMPARE_MISMATCH)
+        elif compare_status == "match":
+            color = QColor(COMPARE_MATCH)
         else:
             color = option.palette.text().color()
         painter.setPen(QPen(color))
@@ -362,6 +398,12 @@ class TranscriptView(QListView):
 
     def clear_search_matches(self) -> None:
         self._model.clear_matches()
+
+    def set_compare_statuses(self, statuses: dict[int, str]) -> None:
+        self._model.set_compare_statuses(statuses)
+
+    def clear_compare_statuses(self) -> None:
+        self._model.clear_compare_statuses()
 
     def select_word(self, word_index: int, *, scroll: bool = True) -> None:
         row = self._model.row_for_word(word_index)

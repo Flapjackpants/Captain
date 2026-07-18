@@ -17,6 +17,13 @@ TEXT_DIM = "#87878f"
 ACCENT = "#e64b3d"      # Resolve's warm selection red-orange
 ACCENT_DARK = "#b23a2e"
 
+# Phase 2 script-compare colors
+COMPARE_MATCH = "#d6d6dc"       # white/correct
+COMPARE_MISSING = "#5b9bd5"     # blue — in script, not in video
+COMPARE_EXTRA = "#c45ec4"       # magenta — in video, not in script
+COMPARE_MISMATCH = "#e85d5d"    # red — incorrect substitution
+COMPARE_REMOVED = "#808080"     # gray strikethrough (user-removed)
+
 QSS = f"""
 QMainWindow, QDialog, QMessageBox {{
     background-color: {BG_WINDOW};

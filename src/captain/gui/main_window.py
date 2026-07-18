@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSplitter,
     QStatusBar,
     QToolButton,
     QVBoxLayout,
@@ -30,8 +32,17 @@ from PySide6.QtWidgets import (
 from .. import config
 from ..api import ClipInfo, ResolveError, create_resolve_handler
 from ..assemble import build_fcp7_xml, next_captain_timeline_name, seconds_to_source_frames
+from ..compare import (
+    AlignmentResult,
+    align_transcript,
+    find_script_retakes,
+    load_script,
+    merge_repeat_groups,
+    parse_script,
+)
 from ..engine import Transcriber, extract_audio
 from ..transcript import Transcript, find_repeats, find_silence_gaps
+from .script_view import ScriptView
 from .transcript_view import TranscriptView
 
 log = logging.getLogger("Captain.gui")
@@ -52,11 +63,20 @@ class TranscribeWorker(QThread):
     finished_ok = Signal(object)  # Transcript
     failed = Signal(str)
 
-    def __init__(self, clip: ClipInfo, transcriber: Transcriber, language, parent=None):
+    def __init__(
+        self,
+        clip: ClipInfo,
+        transcriber: Transcriber,
+        language,
+        parent=None,
+        *,
+        initial_prompt: str | None = None,
+    ):
         super().__init__(parent)
         self.clip = clip
         self.transcriber = transcriber
         self.language = language
+        self.initial_prompt = initial_prompt
 
     def run(self) -> None:
         try:
@@ -70,6 +90,7 @@ class TranscribeWorker(QThread):
                 wav,
                 language=self.language,
                 progress=lambda f, m: self.progress.emit(f, m),
+                initial_prompt=self.initial_prompt,
             )
             self.finished_ok.emit(transcript)
         except Exception as e:  # surfaced to the user in the UI
@@ -95,6 +116,10 @@ class MainWindow(QMainWindow):
         self.worker: TranscribeWorker | None = None
         self._search_matches: list[int] = []
         self._search_pos: int = -1
+        self._script_tokens: list[str] = []
+        self._script_raw: str = ""
+        self._alignment: AlignmentResult | None = None
+        self._syncing_selection = False
 
         self._build_ui()
         self._connect_resolve()
@@ -121,10 +146,20 @@ class MainWindow(QMainWindow):
         self.transcribe_btn.clicked.connect(self._transcribe)
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self._load_clips)
+        self.import_script_btn = QPushButton("Import Script…")
+        self.import_script_btn.setToolTip(
+            "Compare transcript to a plain text, Fountain, or SRT/VTT script"
+        )
+        self.import_script_btn.clicked.connect(self._import_script)
+        self.clear_script_btn = QPushButton("Clear Script")
+        self.clear_script_btn.clicked.connect(self._clear_script)
+        self.clear_script_btn.setVisible(False)
         top.addWidget(self.playhead_btn)
         top.addWidget(self.clip_combo, stretch=1)
         top.addWidget(self.transcribe_btn)
         top.addWidget(self.refresh_btn)
+        top.addWidget(self.import_script_btn)
+        top.addWidget(self.clear_script_btn)
         layout.addLayout(top)
 
         search_row = QHBoxLayout()
@@ -162,15 +197,35 @@ class MainWindow(QMainWindow):
         self.view = TranscriptView()
         self.view.setObjectName("transcript")
         self.view.edited.connect(self._on_edited)
-        self.view.word_activated.connect(self._jump_to_word)
+        self.view.word_activated.connect(self._on_transcript_word)
         self.view.time_activated.connect(self._jump_to_media_second)
-        layout.addWidget(self.view, stretch=1)
+
+        self.script_view = ScriptView()
+        self.script_view.token_activated.connect(self._on_script_token)
+        self.script_panel = QWidget()
+        script_layout = QVBoxLayout(self.script_panel)
+        script_layout.setContentsMargins(0, 0, 0, 0)
+        script_layout.setSpacing(4)
+        script_header = QLabel("Script")
+        script_header.setObjectName("stage")
+        script_layout.addWidget(script_header)
+        script_layout.addWidget(self.script_view, stretch=1)
+        self.script_panel.setVisible(False)
+
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter.addWidget(self.script_panel)
+        self.splitter.addWidget(self.view)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 2)
+        layout.addWidget(self.splitter, stretch=1)
 
         hint = QLabel(
             "Select words, then: Delete removes • Cmd/Ctrl+X cuts • "
             "Cmd/Ctrl+V pastes • Cmd/Ctrl+Z undo • Cmd/Ctrl+Shift+Z redo • "
             "click a word/timecode jumps the playhead • Trim Silence shows "
-            "··· markers (Delete a marker to keep that silence) • Cmd/Ctrl+F search"
+            "··· markers (Delete a marker to keep that silence) • Cmd/Ctrl+F search • "
+            "Import Script for color compare (white=match, blue=missing, "
+            "magenta=extra, red=mismatch, gray=removed)"
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -386,8 +441,18 @@ class MainWindow(QMainWindow):
 
         self.transcribe_btn.setEnabled(False)
         self._show_progress(True)
+        prompt = None
+        if self._alignment is not None:
+            prompt = self._alignment.vocabulary_prompt() or None
+        elif self._script_tokens:
+            prompt = AlignmentResult(
+                script_tokens=self._script_tokens
+            ).vocabulary_prompt() or None
         self.worker = TranscribeWorker(
-            self.current_clip, self.transcriber, self.cfg["language"]
+            self.current_clip,
+            self.transcriber,
+            self.cfg["language"],
+            initial_prompt=prompt,
         )
         self.worker.progress.connect(self._on_progress)
         self.worker.finished_ok.connect(self._on_transcribed)
@@ -410,6 +475,10 @@ class MainWindow(QMainWindow):
     def _on_transcribed(self, transcript: Transcript) -> None:
         self.transcribe_btn.setEnabled(True)
         self._show_progress(False)
+        if self.view.transcript and self.view.transcript.script_text:
+            transcript.script_text = self.view.transcript.script_text
+        elif self._script_raw:
+            transcript.script_text = self._script_raw
         self._save_session(transcript)
         self._show_transcript(transcript)
 
@@ -424,6 +493,21 @@ class MainWindow(QMainWindow):
             self.view.set_timeline_context(clip.timeline_start_frame, clip.fps)
         self.view.set_transcript(transcript)
         self._set_editing_enabled(True)
+        if transcript.script_text:
+            self._script_raw = transcript.script_text
+            self._script_tokens = parse_script(transcript.script_text)
+            self._apply_alignment(transcript)
+        elif self._script_tokens:
+            # Script imported before transcript existed.
+            if self._script_raw:
+                transcript.script_text = self._script_raw
+                self._save_session(transcript)
+            self._apply_alignment(transcript)
+        else:
+            self._alignment = None
+            self.view.clear_compare_statuses()
+            self.script_panel.setVisible(False)
+            self.clear_script_btn.setVisible(False)
         if self._search_bar.isVisible():
             self._on_search_text(self.search_edit.text())
         self._status(
@@ -544,6 +628,10 @@ class MainWindow(QMainWindow):
             min_ngram=self.cfg.get("repeat_min_ngram", 4),
             min_pause=self.cfg.get("repeat_min_pause", 0.35),
         )
+        if self._alignment is not None:
+            groups = merge_repeat_groups(
+                groups + find_script_retakes(transcript, self._alignment)
+            )
         if not groups:
             self._status("No retakes found")
             return
@@ -557,6 +645,107 @@ class MainWindow(QMainWindow):
         self._status(f"Removed {count} words in {len(groups)} abandoned take(s)")
         if self._search_bar.isVisible():
             self._on_search_text(self.search_edit.text())
+
+    # ---- script compare -----------------------------------------------------
+
+    def _import_script(self) -> None:
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Import Script",
+            "",
+            "Scripts (*.txt *.fountain *.srt *.vtt);;All Files (*)",
+        )
+        if not path:
+            return
+        try:
+            raw, tokens = load_script(path)
+        except OSError as e:
+            QMessageBox.warning(self, "Captain", f"Could not read script:\n{e}")
+            return
+        if not tokens:
+            QMessageBox.information(
+                self, "Captain", "No spoken words found in that file."
+            )
+            return
+        self._script_tokens = tokens
+        self._script_raw = raw
+        transcript = self.view.transcript
+        if transcript is not None:
+            transcript.script_text = raw
+            self._save_session(transcript)
+            self._apply_alignment(transcript)
+        else:
+            # Show script pane alone until a transcript exists.
+            self.script_view.set_script(tokens)
+            self.script_panel.setVisible(True)
+            self.clear_script_btn.setVisible(True)
+            self._status(f"Imported script ({len(tokens)} words) — transcribe a clip to compare")
+
+    def _clear_script(self) -> None:
+        self._script_tokens = []
+        self._script_raw = ""
+        self._alignment = None
+        self.script_view.clear()
+        self.script_panel.setVisible(False)
+        self.clear_script_btn.setVisible(False)
+        self.view.clear_compare_statuses()
+        transcript = self.view.transcript
+        if transcript is not None:
+            transcript.script_text = ""
+            self._save_session(transcript)
+        self._status("Script cleared")
+
+    def _apply_alignment(self, transcript: Transcript) -> None:
+        if not self._script_tokens:
+            return
+        self._alignment = align_transcript(transcript, self._script_tokens)
+        self.script_view.set_script(
+            self._script_tokens, self._alignment.script_statuses()
+        )
+        self.view.set_compare_statuses(self._alignment.video_statuses())
+        self.script_panel.setVisible(True)
+        self.clear_script_btn.setVisible(True)
+        stats = self._alignment.video_statuses()
+        n_match = sum(1 for s in stats.values() if s == "match")
+        n_extra = sum(1 for s in stats.values() if s == "extra")
+        n_mis = sum(1 for s in stats.values() if s == "mismatch")
+        n_miss = sum(
+            1 for s in self._alignment.script_statuses().values() if s == "missing"
+        )
+        self._status(
+            f"Compare: {n_match} match • {n_miss} missing • "
+            f"{n_extra} extra • {n_mis} mismatch"
+        )
+
+    def _on_script_token(self, script_index: int) -> None:
+        if self._syncing_selection or self._alignment is None:
+            return
+        self._syncing_selection = True
+        try:
+            self.script_view.select_token(script_index)
+            video_map = self._alignment.script_to_video()
+            widx = video_map.get(script_index)
+            if widx is not None:
+                self.view.select_word(widx)
+                self._jump_to_word(widx)
+        finally:
+            self._syncing_selection = False
+
+    def _on_transcript_word(self, word_index: int) -> None:
+        self._jump_to_word(word_index)
+        if self._syncing_selection or self._alignment is None:
+            return
+        self._syncing_selection = True
+        try:
+            script_map = self._alignment.video_to_script()
+            sidx = script_map.get(word_index)
+            if sidx is not None:
+                self.script_view.select_token(sidx)
+            else:
+                self.script_view.clear_highlight()
+        finally:
+            self._syncing_selection = False
+
     # ---- playhead sync ---------------------------------------------------------
 
     def _jump_to_word(self, word_index: int) -> None:

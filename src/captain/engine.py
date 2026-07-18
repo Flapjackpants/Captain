@@ -250,18 +250,22 @@ class Transcriber:
         audio_path: str,
         language: str | None = None,
         progress: ProgressFn | None = None,
+        initial_prompt: str | None = None,
     ) -> Transcript:
         model = self._load(progress)
         duration = probe_duration(audio_path)
         if progress:
             progress(0.05, "Transcribing...")
 
-        segments, _info = model.transcribe(
-            audio_path,
-            language=language,
-            word_timestamps=True,
-            vad_filter=True,
-        )
+        kwargs: dict = {
+            "language": language,
+            "word_timestamps": True,
+            "vad_filter": True,
+        }
+        if initial_prompt:
+            kwargs["initial_prompt"] = initial_prompt
+
+        segments, _info = model.transcribe(audio_path, **kwargs)
 
         words: list[Word] = []
         for seg_id, seg in enumerate(segments):
