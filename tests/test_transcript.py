@@ -246,6 +246,65 @@ def test_json_roundtrip():
     assert tr2.keep_ranges() == tr.keep_ranges()
 
 
+def test_clean_json_resets_edits_without_mutating():
+    tr = make_transcript(["a", "b", "c"])
+    tr.delete([1])
+    tr.move([2], 0)
+    tr.silence_cuts = [(0.0, 0.1)]
+    tr.script_text = "hello script"
+    before_order = list(tr.order)
+    before_removed = set(tr.removed)
+    before_cuts = list(tr.silence_cuts)
+
+    clean = Transcript.from_json(tr.to_json(clean=True))
+    assert clean.order == [0, 1, 2]
+    assert clean.removed == set()
+    assert clean.silence_cuts == []
+    assert [w.text for w in clean.words] == ["a", "b", "c"]
+    assert clean.script_text == "hello script"
+    assert clean.duration == tr.duration
+    assert clean.source_path == tr.source_path
+    # Live editing state is unchanged.
+    assert tr.order == before_order
+    assert tr.removed == before_removed
+    assert tr.silence_cuts == before_cuts
+
+
+def test_load_clean_discards_legacy_edit_state(tmp_path):
+    tr = make_transcript(["a", "b", "c"])
+    tr.delete([0, 2])
+    tr.move([1], 0)
+    tr.silence_cuts = [(0.5, 0.8)]
+    path = tmp_path / "session.json"
+    # Simulate a legacy session that stored full edit state.
+    path.write_text(tr.to_json(clean=False))
+
+    loaded = Transcript.load(path, clean=True)
+    assert loaded.order == [0, 1, 2]
+    assert loaded.removed == set()
+    assert loaded.silence_cuts == []
+    assert [w.text for w in loaded.words] == ["a", "b", "c"]
+
+
+def test_save_clean_session_roundtrip(tmp_path):
+    tr = make_transcript(["hello", "world"])
+    tr.delete([0])
+    tr.move([1], 0)
+    tr.silence_cuts = [(0.1, 0.2)]
+    tr.script_text = "keep me"
+    path = tmp_path / "clean.json"
+    tr.save(path, clean=True)
+
+    loaded = Transcript.load(path, clean=True)
+    assert loaded.order == [0, 1]
+    assert loaded.removed == set()
+    assert loaded.silence_cuts == []
+    assert loaded.script_text == "keep me"
+    # Editing the live transcript after clean save still works.
+    assert tr.removed == {0}
+    assert tr.order == [1, 0]
+
+
 def test_segment_id_json_roundtrip():
     words = [
         Word(index=0, text="hello", start=0.0, end=0.3, segment_id=0),

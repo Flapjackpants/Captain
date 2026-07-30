@@ -184,7 +184,26 @@ class Transcript:
 
     # ---- persistence ----------------------------------------------------
 
-    def to_json(self) -> str:
+    def reset_edits(self) -> None:
+        """Restore original source order with no removals or silence cuts."""
+        self.order = [w.index for w in self.words]
+        self.removed = set()
+        self.silence_cuts = []
+
+    def to_json(self, *, clean: bool = False) -> str:
+        """Serialize the transcript.
+
+        When ``clean`` is True, persist original word order with an empty
+        removed set and no silence cuts, without mutating this instance.
+        """
+        if clean:
+            order = [w.index for w in self.words]
+            removed: list[int] = []
+            silence_cuts: list[tuple[float, float]] = []
+        else:
+            order = self.order
+            removed = sorted(self.removed)
+            silence_cuts = self.silence_cuts
         return json.dumps(
             {
                 "source_path": self.source_path,
@@ -198,9 +217,9 @@ class Transcript:
                     }
                     for w in self.words
                 ],
-                "order": self.order,
-                "removed": sorted(self.removed),
-                "silence_cuts": self.silence_cuts,
+                "order": order,
+                "removed": removed,
+                "silence_cuts": silence_cuts,
                 "script_text": self.script_text,
             },
             indent=2,
@@ -229,12 +248,16 @@ class Transcript:
             script_text=d.get("script_text", "") or "",
         )
 
-    def save(self, path: Path) -> None:
-        path.write_text(self.to_json())
+    def save(self, path: Path, *, clean: bool = False) -> None:
+        path.write_text(self.to_json(clean=clean))
 
     @classmethod
-    def load(cls, path: Path) -> "Transcript":
-        return cls.from_json(path.read_text())
+    def load(cls, path: Path, *, clean: bool = False) -> "Transcript":
+        """Load a transcript; when ``clean``, discard any saved edit state."""
+        transcript = cls.from_json(path.read_text())
+        if clean:
+            transcript.reset_edits()
+        return transcript
 
 
 # ---- auto-trim helpers ----------------------------------------------------

@@ -495,7 +495,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if answer == QMessageBox.StandardButton.Yes:
-                self._show_transcript(Transcript.load(session))
+                self._show_transcript(Transcript.load(session, clean=True))
                 return
 
         self.transcribe_btn.setEnabled(False)
@@ -581,7 +581,9 @@ class MainWindow(QMainWindow):
 
     def _save_session(self, transcript: Transcript) -> None:
         if self.current_clip is not None:
-            transcript.save(self._session_path(self.current_clip))
+            # Sessions store the clean source transcript so reopenings start
+            # without prior trims, removals, or cut/paste reordering.
+            transcript.save(self._session_path(self.current_clip), clean=True)
 
     def _on_edited(self) -> None:
         transcript = self.view.transcript
