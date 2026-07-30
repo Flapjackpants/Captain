@@ -686,6 +686,34 @@ local function replace_clip_in_place(clip_id, keep_ranges_frames, ripple)
         end
         i = i + 50
     end
+    if #video_tracks > 0 and #audio_tracks > 0 then
+        local link_rf = record_frame
+        for _, range in ipairs(keep_ranges_frames) do
+            local start_f = safe_number(range[1], 0)
+            local end_f = safe_number(range[2], 0)
+            local duration = math.max(0, end_f - start_f)
+            local group = {}
+            for _, track_info in ipairs({
+                { trackType = "video", indices = video_tracks },
+                { trackType = "audio", indices = audio_tracks },
+            }) do
+                for _, idx in ipairs(track_info.indices) do
+                    for _, item in ipairs(timeline:GetItemListInTrack(track_info.trackType, idx) or {}) do
+                        if safe_number(item:GetStart(), -1) == link_rf
+                            and safe_number(item:GetEnd(), -1) == link_rf + duration
+                            and safe_number(item:GetSourceStartFrame(), -1) == start_f
+                            and safe_number(item:GetSourceEndFrame(), -1) == end_f then
+                            table.insert(group, item)
+                        end
+                    end
+                end
+            end
+            if #group < 2 or timeline:SetClipsLinked(group, true) == false then
+                return false
+            end
+            link_rf = link_rf + duration
+        end
+    end
     clips_by_id = {}
     return true
 end
