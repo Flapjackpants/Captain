@@ -231,8 +231,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.splitter, stretch=1)
 
         hint = QLabel(
-            "Select words, then: Delete removes • Cmd/Ctrl+X cuts • "
-            "Cmd/Ctrl+V pastes • Cmd/Ctrl+Z undo • Cmd/Ctrl+Shift+Z redo • "
+            "Select words, then: Delete toggles remove/restore • "
+            "Cmd/Ctrl+X cuts • Cmd/Ctrl+V pastes • Cmd/Ctrl+Z undo • "
+            "Cmd/Ctrl+Shift+Z redo • "
             "click a word/timecode/silence jumps the playhead • "
             "silence markers (…) show long gaps; struck = will be trimmed; "
             "Delete toggles trim vs keep • Trim Silence marks all gaps • "

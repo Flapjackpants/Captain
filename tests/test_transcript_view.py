@@ -1,4 +1,4 @@
-"""GUI-level checks for silence markers and timestamp selection."""
+"""GUI-level checks for silence markers, timestamp selection, and delete toggle."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
-from captain.gui.transcript_view import KIND_ROLE, TranscriptModel
+from captain.gui.transcript_view import KIND_ROLE, TranscriptModel, TranscriptView
 from captain.transcript import Transcript, Word
 
 
@@ -62,3 +62,68 @@ def test_timestamp_rows_not_selectable(qapp):
         elif kind in ("word", "silence"):
             assert flags & Qt.ItemFlag.ItemIsSelectable
     assert found_line
+
+
+def _view_with_words(texts: list[str], *, qapp) -> TranscriptView:
+    words = []
+    t = 0.0
+    for i, text in enumerate(texts):
+        words.append(Word(index=i, text=text, start=t, end=t + 0.3))
+        t += 0.4
+    tr = Transcript(words=words, duration=t + 0.5)
+    view = TranscriptView()
+    view.set_transcript(tr)
+    return view
+
+
+def test_delete_toggles_word_remove_and_restore(qapp):
+    view = _view_with_words(["a", "b", "c"], qapp=qapp)
+    tr = view.transcript
+    assert tr is not None
+
+    view.select_word(1)
+    view.delete_selection()
+    assert tr.removed == {1}
+
+    view.select_word(1)
+    view.delete_selection()
+    assert tr.removed == set()
+
+
+def test_delete_mixed_selection_toggles_each_word(qapp):
+    view = _view_with_words(["a", "b", "c", "d"], qapp=qapp)
+    tr = view.transcript
+    assert tr is not None
+    tr.delete([1, 2])
+    view.refresh()
+
+    # Select active word 0 and removed word 1 together.
+    model = view._model
+    sm = view.selectionModel()
+    sm.clearSelection()
+    for widx in (0, 1):
+        row = model.row_for_word(widx)
+        sm.select(
+            model.index(row),
+            sm.SelectionFlag.Select,
+        )
+
+    view.delete_selection()
+    # 0 was active → removed; 1 was removed → restored.
+    assert tr.removed == {0, 2}
+
+
+def test_delete_word_toggle_is_undoable(qapp):
+    view = _view_with_words(["a", "b", "c"], qapp=qapp)
+    tr = view.transcript
+    assert tr is not None
+
+    view.select_word(1)
+    view.delete_selection()
+    assert tr.removed == {1}
+
+    assert view.undo()
+    assert tr.removed == set()
+
+    assert view.redo()
+    assert tr.removed == {1}

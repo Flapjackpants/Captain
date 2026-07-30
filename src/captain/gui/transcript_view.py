@@ -560,7 +560,13 @@ class TranscriptView(QListView):
             return
         self.push_history()
         if words:
-            self.transcript.delete(words)
+            # Toggle each word: removed → restore, active → remove.
+            to_restore = [w for w in words if w in self.transcript.removed]
+            to_remove = [w for w in words if w not in self.transcript.removed]
+            if to_restore:
+                self.transcript.restore(to_restore)
+            if to_remove:
+                self.transcript.delete(to_remove)
         if silences:
             max_pause = self._model._silence_max_pause
             cuts = list(self.transcript.silence_cuts)
