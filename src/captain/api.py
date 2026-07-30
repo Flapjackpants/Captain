@@ -16,6 +16,7 @@ Two connection modes:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import sys
 from dataclasses import dataclass
@@ -337,7 +338,9 @@ class ResolveHandler:
         self.resolve.OpenPage("edit")
         timeline = self._timeline()
         source_offset = second_in_clip - clip.source_start_sec
-        frame = clip.timeline_start_frame + int(round(source_offset * clip.fps))
+        # First frame at or after onset — never round backward into pre-word silence.
+        offset = int(math.ceil(source_offset * clip.fps - 1e-9))
+        frame = clip.timeline_start_frame + max(0, offset)
         frame = max(clip.timeline_start_frame, min(frame, clip.timeline_end_frame - 1))
         timeline.SetCurrentTimecode(frame_to_timecode(frame, clip.fps))
 

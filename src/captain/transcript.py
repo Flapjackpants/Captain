@@ -13,6 +13,7 @@ order, which the assembler turns into a Resolve timeline (or in-place replace).
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -271,11 +272,20 @@ def shrink_silence_cut(
     return (cs, ce)
 
 
-def silence_period_count(duration: float, *, seconds_per_dot: float = 0.4) -> int:
-    """How many '.' characters to show for a silence of the given length."""
+# Gaps at least this long appear as silence markers in the transcript UI.
+# (Trim Silence still uses the user-configured silence_min_duration.)
+SILENCE_DISPLAY_MIN = 0.1
+
+
+def silence_period_count(duration: float, *, seconds_per_dot: float = 0.1) -> int:
+    """How many '.' characters to show for a silence of the given length.
+
+    One dot per ``seconds_per_dot`` (default 0.1s), using stable half-up
+    rounding so 0.1 → 1, 0.15 → 2, 1.0 → 10.
+    """
     if duration <= 0:
-        return 3
-    return max(3, min(12, int(round(duration / seconds_per_dot))))
+        return 1
+    return max(1, int(round(duration / seconds_per_dot + 1e-9)))
 
 
 def gap_is_trimmed(
@@ -421,8 +431,15 @@ def apply_snapshot(transcript: Transcript, snap: EditSnapshot) -> None:
 def media_sec_to_timeline_frame(
     media_sec: float, timeline_start_frame: int, fps: float
 ) -> int:
-    """Convert media-relative seconds (from clip in-point analysis) to a timeline frame."""
-    return timeline_start_frame + int(round(media_sec * fps))
+    """Convert media-relative seconds to the first timeline frame at or after onset.
+
+    Uses ceil (not nearest-frame round) so seeking never lands in silence
+    immediately before the spoken word.
+    """
+    if fps <= 0:
+        return timeline_start_frame
+    offset = int(math.ceil(media_sec * fps - 1e-9))
+    return timeline_start_frame + max(0, offset)
 
 
 def frame_to_timecode(frame: int, fps: float) -> str:

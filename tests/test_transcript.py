@@ -164,11 +164,18 @@ def test_edit_history_undo_redo():
 
 
 def test_silence_period_count_scales():
-    assert silence_period_count(0.0) == 3
-    assert silence_period_count(0.8) == 3  # round(0.8/0.4)=2 → clamp to 3
-    assert silence_period_count(1.2) == 3
-    assert silence_period_count(2.0) == 5
-    assert silence_period_count(10.0) == 12  # clamp max
+    assert silence_period_count(0.0) == 1
+    assert silence_period_count(0.1) == 1
+    assert silence_period_count(0.15) == 2  # round half-up toward nearest 0.1
+    assert silence_period_count(0.2) == 2
+    assert silence_period_count(1.0) == 10
+    assert silence_period_count(2.0) == 20
+
+
+def test_silence_display_min_constant():
+    from captain.transcript import SILENCE_DISPLAY_MIN
+
+    assert SILENCE_DISPLAY_MIN == 0.1
 
 
 def test_gap_always_visible_trimmed_only_with_cut():
@@ -298,6 +305,21 @@ def test_frame_to_timecode_and_media_offset():
     frame = media_sec_to_timeline_frame(1.0, timeline_start_frame=100, fps=24.0)
     assert frame == 124
     assert frame_to_timecode(frame, 24) == "00:00:05:04"
+
+
+def test_media_sec_maps_forward_not_backward():
+    """Seeking must land on/after speech onset, never in pre-word silence."""
+    from captain.transcript import media_sec_to_timeline_frame
+
+    # Exact frame boundary stays on that frame.
+    assert media_sec_to_timeline_frame(0.5, 0, 24.0) == 12
+    # Just after a frame boundary advances to the next frame (ceil).
+    assert media_sec_to_timeline_frame(0.5 + 1e-6, 0, 24.0) == 13
+    # Just before a frame boundary must not round backward.
+    assert media_sec_to_timeline_frame(12 / 24.0 - 1e-6, 100, 24.0) == 112
+    # Nearest-round would give 111 for ~11.4 frames; ceil gives 12.
+    assert media_sec_to_timeline_frame(11.4 / 24.0, 0, 24.0) == 12
+    assert media_sec_to_timeline_frame(0.0, 50, 24.0) == 50
 
 
 def test_apply_mode_default():

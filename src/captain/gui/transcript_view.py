@@ -1,10 +1,11 @@
 """Line-aware transcript editor widget.
 
 Words render as a wrapping flow grouped into lines. Each line starts with a
-timeline-timecode gutter. Natural silence gaps (>= min duration) appear as
-period markers (more dots = longer). After Trim Silence / Delete, trimmed
-gaps are gray and struck through like removed words. Selection, cut/paste,
-single-click to jump the Resolve playhead. Search highlights matching words.
+timeline-timecode gutter (click-to-seek, not selectable). Natural silence
+gaps (>= 0.1s) appear as period markers (one dot per 0.1s). After Trim
+Silence / Delete, trimmed gaps are gray and struck through like removed
+words. Selection, cut/paste, single-click to jump the Resolve playhead.
+Search highlights matching words.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QKeySequence, QPainter, Q
 from PySide6.QtWidgets import QListView, QStyle, QStyledItemDelegate
 
 from ..transcript import (
+    SILENCE_DISPLAY_MIN,
     EditHistory,
     Transcript,
     TranscriptLine,
@@ -59,11 +61,11 @@ class TranscriptModel(QAbstractListModel):
         self._timeline_start_frame: int = 0
         self._fps: float = 24.0
         self._viewport_width: int = 400
-        self._silence_min_duration: float = 0.8
+        # Used by delete_selection when adding Trim Silence–style cuts.
         self._silence_max_pause: float = 0.25
 
     def set_silence_thresholds(self, min_duration: float, max_pause: float) -> None:
-        self._silence_min_duration = float(min_duration)
+        # min_duration is retained for API compatibility; markers use SILENCE_DISPLAY_MIN.
         self._silence_max_pause = float(max_pause)
         if self.transcript is not None:
             self.refresh()
@@ -119,7 +121,7 @@ class TranscriptModel(QAbstractListModel):
 
     def _append_silence_in_gap(self, gap_start: float, gap_end: float) -> None:
         assert self.transcript is not None
-        if gap_end - gap_start < self._silence_min_duration:
+        if gap_end - gap_start < SILENCE_DISPLAY_MIN:
             return
         trimmed = gap_is_trimmed(gap_start, gap_end, self.transcript.silence_cuts)
         self._rows.append(("silence", (gap_start, gap_end, trimmed)))
@@ -131,7 +133,7 @@ class TranscriptModel(QAbstractListModel):
         tr = self.transcript
         order = tr.order
         if not order:
-            if tr.duration >= self._silence_min_duration:
+            if tr.duration >= SILENCE_DISPLAY_MIN:
                 self._append_silence_in_gap(0.0, tr.duration)
             return
 
@@ -155,6 +157,18 @@ class TranscriptModel(QAbstractListModel):
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return len(self._rows)
+
+    def flags(self, index: QModelIndex):
+        """Timestamp/header rows are enabled (click-to-seek) but not selectable.
+
+        Selection highlighting stays on words and silence markers only.
+        """
+        if not index.isValid() or index.row() < 0 or index.row() >= len(self._rows):
+            return Qt.ItemFlag.NoItemFlags
+        kind, _payload = self._rows[index.row()]
+        if kind == "line":
+            return Qt.ItemFlag.ItemIsEnabled
+        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
 
     def word_index(self, row: int) -> int | None:
         if row < 0 or row >= len(self._rows):

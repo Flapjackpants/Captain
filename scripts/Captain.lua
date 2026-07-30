@@ -492,7 +492,12 @@ local function jump_to_clip_second(clip_id, second_in_clip)
     local timeline = current_timeline()
     local source_start_sec = clip.source_start_frame / clip.fps
     local source_offset = second_in_clip - source_start_sec
-    local frame = clip.timeline_start_frame + math.floor(source_offset * clip.fps + 0.5)
+    -- First frame at or after onset — never round backward into pre-word silence.
+    local offset = math.ceil(source_offset * clip.fps - 1e-9)
+    if offset < 0 then
+        offset = 0
+    end
+    local frame = clip.timeline_start_frame + offset
     if frame < clip.timeline_start_frame then
         frame = clip.timeline_start_frame
     end
