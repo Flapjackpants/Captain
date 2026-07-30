@@ -7,6 +7,9 @@ auto-trim like you’re editing text, then applies those cuts back into DaVinci
 Resolve — replace in place, ripple, or a new timeline. Transcription runs
 locally with Whisper. Works on **Resolve Free and Studio**.
 
+<img width="1800" height="1093" alt="Screenshot 2026-07-18 at 8 50 33 AM" src="https://github.com/user-attachments/assets/737f202e-ee13-4982-839d-5ebb9ad557f9" />
+
+
 ## Why Us?
 
 Video editing still forces you to scrub waveforms and guess where words start.
