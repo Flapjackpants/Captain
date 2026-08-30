@@ -305,6 +305,41 @@ def test_save_clean_session_roundtrip(tmp_path):
     assert tr.order == [1, 0]
 
 
+def test_save_session_preserves_edits_roundtrip(tmp_path):
+    tr = make_transcript(["hello", "world", "again"])
+    tr.delete([1])
+    tr.move([2], 0)
+    tr.silence_cuts = [(0.1, 0.2)]
+    tr.script_text = "keep me"
+    path = tmp_path / "edited.json"
+    tr.save(path, clean=False)
+
+    loaded = Transcript.load(path, clean=False)
+    assert loaded.order == tr.order
+    assert loaded.removed == tr.removed
+    assert loaded.silence_cuts == tr.silence_cuts
+    assert loaded.script_text == "keep me"
+    assert [w.text for w in loaded.words] == ["hello", "world", "again"]
+    assert loaded.keep_ranges() == tr.keep_ranges()
+
+
+def test_import_state_json_restores_edit_layers(tmp_path):
+    tr = make_transcript(["a", "b", "c"])
+    tr.delete([0])
+    tr.move([2], 0)
+    tr.silence_cuts = [(0.5, 0.8)]
+    tr.script_text = "imported script"
+    path = tmp_path / "clip-captain.json"
+    path.write_text(tr.to_json(clean=False))
+
+    loaded = Transcript.load(path, clean=False)
+    assert loaded.order == tr.order
+    assert loaded.removed == tr.removed
+    assert loaded.silence_cuts == tr.silence_cuts
+    assert loaded.script_text == "imported script"
+    assert loaded.keep_ranges() == tr.keep_ranges()
+
+
 def test_segment_id_json_roundtrip():
     words = [
         Word(index=0, text="hello", start=0.0, end=0.3, segment_id=0),

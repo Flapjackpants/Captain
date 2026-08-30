@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import re
 import tempfile
 import traceback
 from pathlib import Path
@@ -156,6 +158,16 @@ class MainWindow(QMainWindow):
         self.clear_script_btn = QPushButton("Clear Script")
         self.clear_script_btn.clicked.connect(self._clear_script)
         self.clear_script_btn.setVisible(False)
+        self.export_state_btn = QPushButton("Export State…")
+        self.export_state_btn.setToolTip(
+            "Save this clip's transcript and edits as a JSON file"
+        )
+        self.export_state_btn.clicked.connect(self._export_state)
+        self.import_state_btn = QPushButton("Import State…")
+        self.import_state_btn.setToolTip(
+            "Load a previously exported transcript state for this clip"
+        )
+        self.import_state_btn.clicked.connect(self._import_state)
         self.settings_btn = QPushButton("Settings…")
         self.settings_btn.setToolTip("Transcript font, size, and spacing")
         self.settings_btn.clicked.connect(self._open_settings)
@@ -165,6 +177,8 @@ class MainWindow(QMainWindow):
         top.addWidget(self.refresh_btn)
         top.addWidget(self.import_script_btn)
         top.addWidget(self.clear_script_btn)
+        top.addWidget(self.export_state_btn)
+        top.addWidget(self.import_state_btn)
         top.addWidget(self.settings_btn)
         layout.addLayout(top)
 
@@ -317,6 +331,7 @@ class MainWindow(QMainWindow):
             self.search_edit,
             self.search_prev_btn,
             self.search_next_btn,
+            self.export_state_btn,
         ):
             widget.setEnabled(on)
 
@@ -474,6 +489,110 @@ class MainWindow(QMainWindow):
         ).hexdigest()[:16]
         return config.sessions_dir() / f"{key}.json"
 
+    def _choose_load_source(self) -> str | None:
+        """Ask whether to load the on-device session or import a file.
+
+        Returns ``"saved"``, ``"import"``, or ``None`` if cancelled.
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("Captain")
+        box.setText(
+            "Load the saved transcript from this device, or import a state file?"
+        )
+        saved_btn = box.addButton("Load saved", QMessageBox.ButtonRole.AcceptRole)
+        import_btn = box.addButton("Import…", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is saved_btn:
+            return "saved"
+        if clicked is import_btn:
+            return "import"
+        return None
+
+    def _load_transcript_file(self, path: Path) -> Transcript | None:
+        """Load a Captain transcript JSON; show a warning and return None on error."""
+        try:
+            text = path.read_text(encoding="utf-8")
+            data = json.loads(text)
+            if not isinstance(data, dict):
+                raise ValueError("Transcript file must be a JSON object")
+            if "words" not in data or "duration" not in data:
+                raise ValueError("Missing required fields: words and duration")
+            if not isinstance(data["words"], list):
+                raise ValueError("words must be a list")
+            transcript = Transcript.from_json(text)
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+            QMessageBox.warning(
+                self, "Captain", f"Could not import transcript state:\n{e}"
+            )
+            return None
+        if not transcript.words:
+            QMessageBox.warning(
+                self,
+                "Captain",
+                "That file has no words. Apply may have nothing to keep.",
+            )
+        return transcript
+
+    def _prompt_import_state(self) -> Transcript | None:
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Import State",
+            "",
+            "Captain State (*.json);;All Files (*)",
+        )
+        if not path:
+            return None
+        return self._load_transcript_file(Path(path))
+
+    def _export_state_default_name(self) -> str:
+        name = self.current_clip.name if self.current_clip else "transcript"
+        safe = re.sub(r"[^\w.\-]+", "_", name).strip("._") or "transcript"
+        return f"{safe}-captain.json"
+
+    def _export_state(self) -> None:
+        transcript = self.view.transcript
+        if transcript is None:
+            QMessageBox.information(self, "Captain", "No transcript to export.")
+            return
+        path, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Export State",
+            self._export_state_default_name(),
+            "Captain State (*.json);;All Files (*)",
+        )
+        if not path:
+            return
+        out = Path(path)
+        if out.suffix.lower() != ".json":
+            out = out.with_suffix(".json")
+        try:
+            transcript.save(out, clean=False)
+        except OSError as e:
+            QMessageBox.warning(self, "Captain", f"Could not export state:\n{e}")
+            return
+        self._status(f"Exported state to {out.name}")
+
+    def _import_state(self) -> None:
+        if self.current_clip is None:
+            row = self.clip_combo.currentIndex()
+            if 0 <= row < len(self.clips):
+                self.current_clip = self.clips[row]
+        if self.current_clip is None:
+            QMessageBox.information(
+                self,
+                "Captain",
+                "Select a clip first (Use Playhead Clip, or pick from the dropdown).",
+            )
+            return
+        transcript = self._prompt_import_state()
+        if transcript is None:
+            return
+        self._show_transcript(transcript)
+        self._save_session(transcript)
+        self._status(f"Imported state ({len(transcript.words)} words)")
+
     def _transcribe(self) -> None:
         row = self.clip_combo.currentIndex()
         if row < 0 or row >= len(self.clips):
@@ -495,7 +614,17 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if answer == QMessageBox.StandardButton.Yes:
-                self._show_transcript(Transcript.load(session, clean=True))
+                choice = self._choose_load_source()
+                if choice is None:
+                    return
+                if choice == "saved":
+                    self._show_transcript(Transcript.load(session, clean=False))
+                    return
+                transcript = self._prompt_import_state()
+                if transcript is None:
+                    return
+                self._show_transcript(transcript)
+                self._save_session(transcript)
                 return
 
         self.transcribe_btn.setEnabled(False)
@@ -581,9 +710,9 @@ class MainWindow(QMainWindow):
 
     def _save_session(self, transcript: Transcript) -> None:
         if self.current_clip is not None:
-            # Sessions store the clean source transcript so reopenings start
-            # without prior trims, removals, or cut/paste reordering.
-            transcript.save(self._session_path(self.current_clip), clean=True)
+            # Sessions keep words plus edit state (order, removed, silence_cuts)
+            # and script_text so reopenings can restore the working cut.
+            transcript.save(self._session_path(self.current_clip), clean=False)
 
     def _on_edited(self) -> None:
         transcript = self.view.transcript
