@@ -501,13 +501,82 @@ class ResolveHandler:
                 )
             rf += duration
 
+        inserted: list[Any] = []
         for i in range(0, len(entries), 50):
-            if not media_pool.AppendToTimeline(entries[i : i + 50]):
+            appended = media_pool.AppendToTimeline(entries[i : i + 50])
+            if not appended:
                 log.warning("Replace AppendToTimeline chunk %d failed", i // 50)
                 return False
+            if isinstance(appended, list):
+                inserted.extend(appended)
+
+        if video_tracks and audio_tracks:
+            self._relink_inserted(
+                timeline, ranges, entries, inserted,
+                video_tracks, audio_tracks, record_frame,
+            )
         # Cache is stale after timeline mutation.
         self._clips.clear()
         return True
+
+    def _relink_inserted(
+        self,
+        timeline: Any,
+        ranges: list[tuple[int, int]],
+        entries: list[dict],
+        inserted: list[Any],
+        video_tracks: list[int],
+        audio_tracks: list[int],
+        record_frame: int,
+    ) -> None:
+        """Re-link the A/V items created by replace_clip_in_place.
+
+        Prefer the items AppendToTimeline returned (entries are built per keep
+        range, video then audio, so slice per range). Position-based matching
+        is unreliable after a ripple delete shifts timeline content, so the
+        fallback scan matches by source range only and groups items by the
+        timeline start where they actually landed.
+        """
+        group_size = len(video_tracks) + len(audio_tracks)
+        if len(inserted) == len(entries):
+            for g in range(0, len(inserted), group_size):
+                group = inserted[g : g + group_size]
+                if len(group) >= 2 and timeline.SetClipsLinked(group, True) is False:
+                    log.warning(
+                        "SetClipsLinked failed for inserted group %d", g // group_size
+                    )
+            return
+
+        link_rf = record_frame
+        for start, end in ranges:
+            duration = max(0, end - start)
+            by_start: dict[int, list[Any]] = {}
+            for track_type, indices in (
+                ("video", video_tracks),
+                ("audio", audio_tracks),
+            ):
+                for idx in indices:
+                    for item in timeline.GetItemListInTrack(track_type, idx) or []:
+                        try:
+                            src_start = int(item.GetSourceStartFrame())
+                            src_end = int(item.GetSourceEndFrame())
+                            item_start = int(item.GetStart())
+                        except Exception:
+                            continue
+                        if src_start == start and src_end == end:
+                            by_start.setdefault(item_start, []).append(item)
+            candidates = [
+                (s, group) for s, group in by_start.items() if len(group) >= 2
+            ]
+            if candidates:
+                _, best_group = min(
+                    candidates, key=lambda sg: abs(sg[0] - link_rf)
+                )
+                if timeline.SetClipsLinked(best_group, True) is False:
+                    log.warning("SetClipsLinked failed for range %d-%d", start, end)
+            else:
+                log.warning("No linkable items found for range %d-%d", start, end)
+            link_rf += duration
 
     # ---- bridge dispatch (host process) ---------------------------------
 

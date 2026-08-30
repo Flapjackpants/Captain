@@ -680,43 +680,82 @@ local function replace_clip_in_place(clip_id, keep_ranges_frames, ripple)
         rf = rf + duration
     end
 
+    local inserted = {}
     local i = 1
     while i <= #entries do
         local chunk = {}
         for j = i, math.min(i + 49, #entries) do
             table.insert(chunk, entries[j])
         end
-        if not media_pool:AppendToTimeline(chunk) then
+        local appended = media_pool:AppendToTimeline(chunk)
+        if not appended then
             return false
+        end
+        if type(appended) == "table" then
+            for _, it in ipairs(appended) do
+                table.insert(inserted, it)
+            end
         end
         i = i + 50
     end
     if #video_tracks > 0 and #audio_tracks > 0 then
-        local link_rf = record_frame
-        for _, range in ipairs(keep_ranges_frames) do
-            local start_f = safe_number(range[1], 0)
-            local end_f = safe_number(range[2], 0)
-            local duration = math.max(0, end_f - start_f)
-            local group = {}
-            for _, track_info in ipairs({
-                { trackType = "video", indices = video_tracks },
-                { trackType = "audio", indices = audio_tracks },
-            }) do
-                for _, idx in ipairs(track_info.indices) do
-                    for _, item in ipairs(timeline:GetItemListInTrack(track_info.trackType, idx) or {}) do
-                        if safe_number(item:GetStart(), -1) == link_rf
-                            and safe_number(item:GetEnd(), -1) == link_rf + duration
-                            and safe_number(item:GetSourceStartFrame(), -1) == start_f
-                            and safe_number(item:GetSourceEndFrame(), -1) == end_f then
-                            table.insert(group, item)
+        local group_size = #video_tracks + #audio_tracks
+        if #inserted == #entries then
+            -- Preferred: link the exact items AppendToTimeline returned. Entries
+            -- are built per keep range (video then audio), so slice per range.
+            -- Position-based matching is unreliable after a ripple delete shifts
+            -- timeline content.
+            for g = 1, #inserted, group_size do
+                local group = {}
+                for j = g, math.min(g + group_size - 1, #inserted) do
+                    table.insert(group, inserted[j])
+                end
+                if #group >= 2 and timeline:SetClipsLinked(group, true) == false then
+                    script_log("SetClipsLinked failed for inserted group at " .. g)
+                end
+            end
+        else
+            -- Fallback: match by source range only, then group by the actual
+            -- timeline start of each copy (do not assume where clips landed).
+            local link_rf = record_frame
+            for _, range in ipairs(keep_ranges_frames) do
+                local start_f = safe_number(range[1], 0)
+                local end_f = safe_number(range[2], 0)
+                local duration = math.max(0, end_f - start_f)
+                local by_start = {}
+                for _, track_info in ipairs({
+                    { trackType = "video", indices = video_tracks },
+                    { trackType = "audio", indices = audio_tracks },
+                }) do
+                    for _, idx in ipairs(track_info.indices) do
+                        for _, item in ipairs(timeline:GetItemListInTrack(track_info.trackType, idx) or {}) do
+                            if safe_number(item:GetSourceStartFrame(), -1) == start_f
+                                and safe_number(item:GetSourceEndFrame(), -1) == end_f then
+                                local s = safe_number(item:GetStart(), -1)
+                                by_start[s] = by_start[s] or {}
+                                table.insert(by_start[s], item)
+                            end
                         end
                     end
                 end
+                local best_start, best_group = nil, nil
+                for s, group in pairs(by_start) do
+                    if #group >= 2 and (best_start == nil
+                        or math.abs(s - link_rf) < math.abs(best_start - link_rf)) then
+                        best_start, best_group = s, group
+                    end
+                end
+                if best_group then
+                    if timeline:SetClipsLinked(best_group, true) == false then
+                        script_log("SetClipsLinked failed for range "
+                            .. start_f .. "-" .. end_f)
+                    end
+                else
+                    script_log("No linkable items found for range "
+                        .. start_f .. "-" .. end_f)
+                end
+                link_rf = link_rf + duration
             end
-            if #group < 2 or timeline:SetClipsLinked(group, true) == false then
-                return false
-            end
-            link_rf = link_rf + duration
         end
     end
     clips_by_id = {}
