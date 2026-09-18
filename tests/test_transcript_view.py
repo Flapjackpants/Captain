@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from captain.gui.transcript_view import KIND_ROLE, TranscriptModel, TranscriptView
-from captain.transcript import Transcript, Word
+from captain.transcript import SILENCE_DISPLAY_MIN, Transcript, Word
 
 
 @pytest.fixture(scope="module")
@@ -29,8 +29,7 @@ def _model_with_gap(gap: float, *, qapp) -> TranscriptModel:
     ]
     tr = Transcript(words=words, duration=words[-1].end)
     model = TranscriptModel()
-    # Trim threshold stays high; display uses SILENCE_DISPLAY_MIN (0.1).
-    model.set_silence_thresholds(min_duration=0.8, max_pause=0.25)
+    model.set_silence_thresholds(min_duration=SILENCE_DISPLAY_MIN, max_pause=0.0)
     model.set_transcript(tr)
     return model
 
@@ -64,14 +63,15 @@ def test_timestamp_rows_not_selectable(qapp):
     assert found_line
 
 
-def _view_with_words(texts: list[str], *, qapp) -> TranscriptView:
+def _view_with_words(texts: list[str], *, qapp, gap: float = 0.1) -> TranscriptView:
     words = []
     t = 0.0
     for i, text in enumerate(texts):
         words.append(Word(index=i, text=text, start=t, end=t + 0.3))
-        t += 0.4
+        t += 0.3 + gap
     tr = Transcript(words=words, duration=t + 0.5)
     view = TranscriptView()
+    view.set_silence_thresholds(SILENCE_DISPLAY_MIN, 0.0)
     view.set_transcript(tr)
     return view
 
@@ -127,3 +127,63 @@ def test_delete_word_toggle_is_undoable(qapp):
 
     assert view.redo()
     assert tr.removed == {1}
+
+
+def test_delete_trims_short_visible_silence_with_zero_pause(qapp):
+    view = _view_with_words(["a", "b"], qapp=qapp, gap=0.15)
+    view.set_silence_thresholds(SILENCE_DISPLAY_MIN, 0.0)
+    view.refresh()
+    tr = view.transcript
+    assert tr is not None
+    model = view._model
+    silence_rows = [
+        i
+        for i in range(model.rowCount())
+        if model.data(model.index(i), KIND_ROLE) == "silence"
+    ]
+    assert silence_rows
+    sm = view.selectionModel()
+    sm.clearSelection()
+    sm.select(model.index(silence_rows[0]), sm.SelectionFlag.ClearAndSelect)
+    view.delete_selection()
+    assert tr.silence_cuts
+    gap_start, gap_end = tr.words[0].end, tr.words[1].start
+    assert any(
+        c[0] == pytest.approx(gap_start) and c[1] == pytest.approx(gap_end)
+        for c in tr.silence_cuts
+    )
+
+
+def test_select_model_range_selects_intervening_words_and_silence(qapp):
+    """Range selection is model-order contiguous, not rubber-band rectangle."""
+    view = _view_with_words(["one", "two", "three", "four"], qapp=qapp, gap=0.2)
+    model = view._model
+    # Force a narrow viewport so words wrap across visual lines.
+    view.resize(80, 200)
+    view._model.set_viewport_width(80)
+    view.doItemsLayout()
+
+    row_a = model.row_for_word(0)
+    row_d = model.row_for_word(3)
+    assert row_a >= 0 and row_d > row_a
+    view.select_model_range(row_a, row_d)
+
+    selected_rows = sorted(i.row() for i in view.selectionModel().selectedIndexes())
+    # Every selectable row between endpoints must be selected.
+    for r in range(row_a, row_d + 1):
+        flags = model.flags(model.index(r))
+        if flags & Qt.ItemFlag.ItemIsSelectable:
+            assert r in selected_rows
+        else:
+            assert r not in selected_rows
+
+    selected_words = set(view._selected_word_indices())
+    assert selected_words == {0, 1, 2, 3}
+    # Silence markers between words are included when present.
+    silence_in_range = [
+        r
+        for r in range(row_a, row_d + 1)
+        if model.data(model.index(r), KIND_ROLE) == "silence"
+    ]
+    for r in silence_in_range:
+        assert r in selected_rows

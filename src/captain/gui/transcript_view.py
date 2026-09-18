@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import (
     QAbstractListModel,
+    QItemSelection,
     QModelIndex,
     QSize,
     Qt,
@@ -62,7 +63,7 @@ class TranscriptModel(QAbstractListModel):
         self._fps: float = 24.0
         self._viewport_width: int = 400
         # Used by delete_selection when adding Trim Silence–style cuts.
-        self._silence_max_pause: float = 0.25
+        self._silence_max_pause: float = 0.0
 
     def set_silence_thresholds(self, min_duration: float, max_pause: float) -> None:
         # min_duration is retained for API compatibility; markers use SILENCE_DISPLAY_MIN.
@@ -427,11 +428,16 @@ class TranscriptView(QListView):
         self.setWrapping(True)
         self.setResizeMode(QListView.ResizeMode.Adjust)
         self.setSelectionMode(QListView.SelectionMode.ExtendedSelection)
+        self.setSelectionRectVisible(False)
         self.setSpacing(0)
         self.setUniformItemSizes(False)
-        self.clicked.connect(self._on_click)
         self._clipboard_words: list[int] = []
         self._history = EditHistory()
+        # Reading-order drag selection (not rubber-band rectangle).
+        self._select_anchor: int | None = None
+        self._drag_selecting = False
+        self._press_row: int | None = None
+        self._suppress_clicked = False
 
     def apply_typography(
         self,
@@ -500,6 +506,126 @@ class TranscriptView(QListView):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._model.set_viewport_width(self.viewport().width())
+
+    def select_model_range(self, start_row: int, end_row: int) -> None:
+        """Select all selectable rows between start_row and end_row (inclusive)."""
+        self._select_row_range(start_row, end_row, clear=True)
+        self._select_anchor = start_row
+
+    def _select_row_range(
+        self, a: int, b: int, *, clear: bool = True
+    ) -> None:
+        sm = self.selectionModel()
+        if sm is None or self._model.rowCount() == 0:
+            return
+        lo = max(0, min(a, b))
+        hi = min(self._model.rowCount() - 1, max(a, b))
+        selection = QItemSelection()
+        for r in range(lo, hi + 1):
+            idx = self._model.index(r)
+            if self._model.flags(idx) & Qt.ItemFlag.ItemIsSelectable:
+                selection.select(idx, idx)
+        flags = (
+            sm.SelectionFlag.ClearAndSelect
+            if clear
+            else sm.SelectionFlag.Select
+        )
+        sm.select(selection, flags)
+
+    def _row_at_pos(self, pos) -> int:
+        index = self.indexAt(pos)
+        return index.row() if index.isValid() else -1
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            super().mousePressEvent(event)
+            return
+
+        pos = event.position().toPoint()
+        index = self.indexAt(pos)
+        row = index.row() if index.isValid() else -1
+        self._press_row = row
+        self._drag_selecting = False
+        self._suppress_clicked = False
+        mods = event.modifiers()
+        ctrl = bool(
+            mods
+            & (
+                Qt.KeyboardModifier.ControlModifier
+                | Qt.KeyboardModifier.MetaModifier
+            )
+        )
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        sm = self.selectionModel()
+
+        if row < 0:
+            if not ctrl:
+                sm.clearSelection()
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            event.accept()
+            return
+
+        selectable = bool(
+            self._model.flags(index) & Qt.ItemFlag.ItemIsSelectable
+        )
+
+        if ctrl:
+            if selectable:
+                sm.select(index, sm.SelectionFlag.Toggle)
+                self._select_anchor = row
+            self.setCurrentIndex(index)
+        elif shift:
+            anchor = self._select_anchor if self._select_anchor is not None else row
+            self._select_row_range(anchor, row, clear=True)
+            self.setCurrentIndex(index)
+            self._drag_selecting = True
+        else:
+            self._select_anchor = row
+            if selectable:
+                sm.select(index, sm.SelectionFlag.ClearAndSelect)
+            else:
+                sm.clearSelection()
+            self.setCurrentIndex(index)
+            self._drag_selecting = True
+
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        if (
+            self._drag_selecting
+            and event.buttons() & Qt.MouseButton.LeftButton
+            and self._select_anchor is not None
+        ):
+            row = self._row_at_pos(event.position().toPoint())
+            if row >= 0:
+                if row != self._press_row:
+                    self._suppress_clicked = True
+                self._select_row_range(self._select_anchor, row, clear=True)
+                self.setCurrentIndex(self._model.index(row))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            press_row = self._press_row
+            suppress = self._suppress_clicked
+            self._drag_selecting = False
+            self._press_row = None
+            self._suppress_clicked = False
+            index = self.indexAt(event.position().toPoint())
+            # Mirror QAbstractItemView.clicked: same item, no drag.
+            if (
+                not suppress
+                and index.isValid()
+                and press_row is not None
+                and index.row() == press_row
+            ):
+                self._on_click(index)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def _selected_word_indices(self) -> list[int]:
         rows = sorted(i.row() for i in self.selectionModel().selectedIndexes())

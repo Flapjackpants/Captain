@@ -1,4 +1,4 @@
-"""Settings dialog for transcript typography."""
+"""Settings dialog for transcript typography and silence trim."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QFontComboBox,
     QSpinBox,
@@ -16,7 +17,7 @@ from PySide6.QtWidgets import (
 
 
 class SettingsDialog(QDialog):
-    """Edit font family, size, and word spacing for the transcript."""
+    """Edit font, spacing, and retained silence after Trim Silence."""
 
     def __init__(self, cfg: dict[str, Any], parent=None):
         super().__init__(parent)
@@ -50,11 +51,23 @@ class SettingsDialog(QDialog):
         self.pad_y_spin.setSuffix(" px")
         self.pad_y_spin.setValue(int(cfg.get("transcript_word_pad_y", 2)))
 
+        self.pause_spin = QDoubleSpinBox()
+        self.pause_spin.setRange(0.0, 1.0)
+        self.pause_spin.setSingleStep(0.05)
+        self.pause_spin.setDecimals(2)
+        self.pause_spin.setSuffix(" s")
+        self.pause_spin.setValue(float(cfg.get("silence_max_pause", 0.0)))
+        self.pause_spin.setToolTip(
+            "Silence kept on each side of a trimmed gap. "
+            "0 removes the entire gap (default)."
+        )
+
         form.addRow("Font", self.font_combo)
         form.addRow("Size", self.size_spin)
         form.addRow("Word spacing", self.spacing_spin)
         form.addRow("Horizontal pad", self.pad_x_spin)
         form.addRow("Vertical pad", self.pad_y_spin)
+        form.addRow("Retained silence", self.pause_spin)
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(
@@ -71,4 +84,5 @@ class SettingsDialog(QDialog):
             "transcript_word_spacing": self.spacing_spin.value(),
             "transcript_word_pad_x": self.pad_x_spin.value(),
             "transcript_word_pad_y": self.pad_y_spin.value(),
+            "silence_max_pause": self.pause_spin.value(),
         }

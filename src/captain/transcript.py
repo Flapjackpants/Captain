@@ -270,17 +270,28 @@ def _norm(text: str) -> str:
 def find_silence_gaps(
     transcript: Transcript, min_duration: float, max_pause: float
 ) -> list[tuple[float, float]]:
-    """Gaps between consecutive words longer than min_duration, shrunk to
-    retain max_pause of silence on each side of the cut."""
+    """Gaps between consecutive *display-order* words longer than min_duration,
+    shrunk to retain ``max_pause`` of silence on each side of the cut.
+
+    Walks ``transcript.order`` (plus lead-in / trail-out) so cuts match the
+    silence markers shown in the UI.
+    """
     cuts: list[tuple[float, float]] = []
     words = transcript.words
-    boundaries = [(0.0, words[0].start)] if words else []
-    boundaries += [(words[i].end, words[i + 1].start) for i in range(len(words) - 1)]
-    if words:
-        boundaries.append((words[-1].end, transcript.duration))
+    order = transcript.order
+    if not order:
+        return cuts
+    boundaries: list[tuple[float, float]] = [(0.0, words[order[0]].start)]
+    for i in range(len(order) - 1):
+        prev = words[order[i]]
+        cur = words[order[i + 1]]
+        boundaries.append((prev.end, cur.start))
+    boundaries.append((words[order[-1]].end, transcript.duration))
     for gap_start, gap_end in boundaries:
+        if gap_end - gap_start < min_duration:
+            continue
         cut = shrink_silence_cut(gap_start, gap_end, max_pause)
-        if cut is not None and gap_end - gap_start >= min_duration:
+        if cut is not None:
             cuts.append(cut)
     return cuts
 
@@ -288,15 +299,20 @@ def find_silence_gaps(
 def shrink_silence_cut(
     gap_start: float, gap_end: float, max_pause: float
 ) -> tuple[float, float] | None:
-    """Return the excised interior of a gap, retaining max_pause on each side."""
-    cs, ce = gap_start + max_pause, gap_end - max_pause
+    """Return the excised interior of a gap, retaining max_pause on each side.
+
+    With ``max_pause=0`` the entire gap is cut. Returns None when the gap is
+    too short to leave a non-empty interior after retaining the pause.
+    """
+    keep = max(0.0, float(max_pause))
+    cs, ce = gap_start + keep, gap_end - keep
     if ce - cs <= 1e-3:
         return None
     return (cs, ce)
 
 
 # Gaps at least this long appear as silence markers in the transcript UI.
-# (Trim Silence still uses the user-configured silence_min_duration.)
+# Trim Silence uses the same floor so every visible ellipsis is auto-marked.
 SILENCE_DISPLAY_MIN = 0.1
 
 

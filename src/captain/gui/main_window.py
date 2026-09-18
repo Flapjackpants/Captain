@@ -43,7 +43,7 @@ from ..compare import (
     parse_script,
 )
 from ..engine import Transcriber, extract_audio
-from ..transcript import Transcript, find_repeats, find_silence_gaps
+from ..transcript import Transcript, SILENCE_DISPLAY_MIN, find_repeats, find_silence_gaps
 from .script_view import ScriptView
 from .settings_dialog import SettingsDialog
 from .transcript_view import TranscriptView
@@ -217,7 +217,7 @@ class MainWindow(QMainWindow):
         self.view = TranscriptView()
         self.view.setObjectName("transcript")
         self.view.set_silence_thresholds(
-            self.cfg["silence_min_duration"],
+            SILENCE_DISPLAY_MIN,
             self.cfg["silence_max_pause"],
         )
         self.view.edited.connect(self._on_edited)
@@ -479,6 +479,10 @@ class MainWindow(QMainWindow):
         self.cfg.update(dlg.values())
         config.save_config(self.cfg)
         self._apply_typography_from_cfg()
+        self.view.set_silence_thresholds(
+            SILENCE_DISPLAY_MIN,
+            self.cfg["silence_max_pause"],
+        )
         self._status("Settings saved")
 
     # ---- transcription ------------------------------------------------------
@@ -680,7 +684,7 @@ class MainWindow(QMainWindow):
         if clip is not None:
             self.view.set_timeline_context(clip.timeline_start_frame, clip.fps)
         self.view.set_silence_thresholds(
-            self.cfg["silence_min_duration"],
+            SILENCE_DISPLAY_MIN,
             self.cfg["silence_max_pause"],
         )
         self._apply_typography_from_cfg()
@@ -801,7 +805,7 @@ class MainWindow(QMainWindow):
         self.view.push_history()
         cuts = find_silence_gaps(
             transcript,
-            min_duration=self.cfg["silence_min_duration"],
+            min_duration=SILENCE_DISPLAY_MIN,
             max_pause=self.cfg["silence_max_pause"],
         )
         transcript.silence_cuts = cuts

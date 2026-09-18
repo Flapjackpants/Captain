@@ -96,6 +96,47 @@ def test_silence_respects_max_pause():
     assert cut[1] == pytest.approx(tr.words[1].start - 0.25)
 
 
+def test_silence_max_pause_zero_cuts_full_gap():
+    tr = make_transcript(["a", "b"], gap=0.5)
+    gap_start, gap_end = tr.words[0].end, tr.words[1].start
+    cuts = find_silence_gaps(tr, min_duration=0.1, max_pause=0.0)
+    (cut,) = [
+        c for c in cuts
+        if c[0] >= gap_start - 1e-9 and c[1] <= gap_end + 1e-9
+    ]
+    assert cut[0] == pytest.approx(gap_start)
+    assert cut[1] == pytest.approx(gap_end)
+
+
+def test_silence_short_visible_gap_trimmed_with_zero_pause():
+    from captain.transcript import SILENCE_DISPLAY_MIN
+
+    tr = make_transcript(["a", "b"], gap=0.15)
+    gap_start, gap_end = tr.words[0].end, tr.words[1].start
+    assert gap_end - gap_start >= SILENCE_DISPLAY_MIN
+    cuts = find_silence_gaps(tr, min_duration=SILENCE_DISPLAY_MIN, max_pause=0.0)
+    assert any(
+        c[0] == pytest.approx(gap_start) and c[1] == pytest.approx(gap_end)
+        for c in cuts
+    )
+
+
+def test_find_silence_gaps_follows_display_order():
+    """After reorder, gaps are between consecutive *order* words, not source index."""
+    words = [
+        Word(index=0, text="a", start=0.0, end=0.3),
+        Word(index=1, text="b", start=1.0, end=1.3),  # 0.7s gap after a in source
+        Word(index=2, text="c", start=0.4, end=0.7),
+    ]
+    tr = Transcript(words=words, duration=2.0)
+    tr.order = [0, 2, 1]  # a, c, b — gap a→c is 0.1s, c→b is 0.3s
+    cuts = find_silence_gaps(tr, min_duration=0.1, max_pause=0.0)
+    # Source-order would mark a→b (0.7s); display order marks a→c and c→b.
+    assert (0.3, 0.4) in [(round(s, 4), round(e, 4)) for s, e in cuts]
+    assert (0.7, 1.0) in [(round(s, 4), round(e, 4)) for s, e in cuts]
+    assert (0.3, 1.0) not in [(round(s, 4), round(e, 4)) for s, e in cuts]
+
+
 def test_find_repeats_phrase_with_pause():
     # Four-word take repeated after a clear pause between copies.
     texts = ["so", "I", "went", "home", "early", "I", "went", "home", "early", "then"]

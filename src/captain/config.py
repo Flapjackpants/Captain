@@ -16,8 +16,8 @@ DEFAULTS: dict[str, Any] = {
     "whisper_device": "auto",
     "whisper_compute_type": "int8",
     "language": None,  # autodetect
-    "silence_min_duration": 0.8,   # gaps >= this are considered trimmable silence
-    "silence_max_pause": 0.25,     # silence retained at each trimmed junction
+    "silence_min_duration": 0.1,   # legacy; Trim Silence uses SILENCE_DISPLAY_MIN
+    "silence_max_pause": 0.0,      # silence retained on each side of a trimmed gap
     "repeat_min_ngram": 4,         # shortest phrase treated as a retake
     "repeat_max_ngram": 8,
     "repeat_min_pause": 0.35,      # pause between copies to count as a retake
