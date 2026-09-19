@@ -187,3 +187,111 @@ def test_select_model_range_selects_intervening_words_and_silence(qapp):
     ]
     for r in silence_in_range:
         assert r in selected_rows
+
+
+def test_mouse_drag_selection_selects_all_words_between_press_and_release(qapp):
+    from PySide6.QtCore import QPointF, QEvent
+    from PySide6.QtGui import QMouseEvent
+
+    view = _view_with_words(["first", "second", "third", "fourth", "fifth"], qapp=qapp, gap=0.2)
+    view.resize(100, 200)
+    view.show()
+    qapp.processEvents()
+
+    model = view._model
+    row1 = model.row_for_word(1)  # "second"
+    row3 = model.row_for_word(3)  # "fourth"
+    p1 = view.visualRect(model.index(row1)).center()
+    p3 = view.visualRect(model.index(row3)).center()
+
+    # Press on row1
+    press = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(p1),
+        QPointF(p1),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    qapp.sendEvent(view.viewport(), press)
+    assert set(view._selected_word_indices()) == {1}
+
+    # Drag to row3
+    move = QMouseEvent(
+        QEvent.Type.MouseMove,
+        QPointF(p3),
+        QPointF(p3),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    qapp.sendEvent(view.viewport(), move)
+    # Must select all words between 1 and 3 in reading order (1, 2, 3), not just 3!
+    assert set(view._selected_word_indices()) == {1, 2, 3}
+
+    # Release at row3
+    release = QMouseEvent(
+        QEvent.Type.MouseButtonRelease,
+        QPointF(p3),
+        QPointF(p3),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    qapp.sendEvent(view.viewport(), release)
+    assert set(view._selected_word_indices()) == {1, 2, 3}
+
+
+def test_mouse_drag_backward_and_margins(qapp):
+    from PySide6.QtCore import QPoint, QPointF, QEvent
+    from PySide6.QtGui import QMouseEvent
+
+    view = _view_with_words(["a", "b", "c", "d"], qapp=qapp, gap=0.2)
+    view.resize(300, 200)
+    view.show()
+    qapp.processEvents()
+
+    model = view._model
+    row2 = model.row_for_word(2)  # "c"
+    row0 = model.row_for_word(0)  # "a"
+    p2 = view.visualRect(model.index(row2)).center()
+    p0 = view.visualRect(model.index(row0)).center()
+
+    # Press on word 2
+    press = QMouseEvent(
+        QEvent.Type.MouseButtonPress,
+        QPointF(p2),
+        QPointF(p2),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    qapp.sendEvent(view.viewport(), press)
+
+    # Drag backward to word 0
+    move = QMouseEvent(
+        QEvent.Type.MouseMove,
+        QPointF(p0),
+        QPointF(p0),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    qapp.sendEvent(view.viewport(), move)
+    assert set(view._selected_word_indices()) == {0, 1, 2}
+
+    # Drag into right margin beyond last word
+    p_margin = QPoint(290, p2.y())
+    move_margin = QMouseEvent(
+        QEvent.Type.MouseMove,
+        QPointF(p_margin),
+        QPointF(p_margin),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    qapp.sendEvent(view.viewport(), move_margin)
+    # Dragged from 2 forward into margin of that line: words 2 and 3 should be selected
+    assert 2 in view._selected_word_indices()
+    assert 3 in view._selected_word_indices()
+

@@ -495,11 +495,13 @@ class TranscriptView(QListView):
         if row < 0:
             return
         index = self._model.index(row)
-        self.selectionModel().select(
+        sm = self.selectionModel()
+        sm.select(
             index,
-            self.selectionModel().SelectionFlag.ClearAndSelect,
+            sm.SelectionFlag.ClearAndSelect,
         )
-        self.setCurrentIndex(index)
+        sm.setCurrentIndex(index, sm.SelectionFlag.NoUpdate)
+        self._select_anchor = row
         if scroll:
             self.scrollTo(index, QListView.ScrollHint.PositionAtCenter)
 
@@ -521,10 +523,7 @@ class TranscriptView(QListView):
         lo = max(0, min(a, b))
         hi = min(self._model.rowCount() - 1, max(a, b))
         selection = QItemSelection()
-        for r in range(lo, hi + 1):
-            idx = self._model.index(r)
-            if self._model.flags(idx) & Qt.ItemFlag.ItemIsSelectable:
-                selection.select(idx, idx)
+        selection.select(self._model.index(lo), self._model.index(hi))
         flags = (
             sm.SelectionFlag.ClearAndSelect
             if clear
@@ -533,8 +532,50 @@ class TranscriptView(QListView):
         sm.select(selection, flags)
 
     def _row_at_pos(self, pos) -> int:
-        index = self.indexAt(pos)
-        return index.row() if index.isValid() else -1
+        idx = self.indexAt(pos)
+        if idx.isValid():
+            return idx.row()
+        n = self._model.rowCount()
+        if n == 0:
+            return -1
+
+        r0_rect = self.visualRect(self._model.index(0))
+        rn_rect = self.visualRect(self._model.index(n - 1))
+        if pos.y() <= r0_rect.top():
+            return 0
+        if pos.y() >= rn_rect.bottom():
+            return n - 1
+
+        # Binary search for the last row with rect.top() <= pos.y()
+        lo = 0
+        hi = n - 1
+        best_r = 0
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            rect = self.visualRect(self._model.index(mid))
+            if rect.top() <= pos.y():
+                best_r = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+
+        target_top = self.visualRect(self._model.index(best_r)).top()
+        start_r = best_r
+        while start_r > 0 and self.visualRect(self._model.index(start_r - 1)).top() == target_top:
+            start_r -= 1
+        end_r = best_r
+        while end_r < n - 1 and self.visualRect(self._model.index(end_r + 1)).top() == target_top:
+            end_r += 1
+
+        line_rows = [(r, self.visualRect(self._model.index(r))) for r in range(start_r, end_r + 1)]
+        if not line_rows:
+            return best_r
+
+        if pos.x() <= line_rows[0][1].left():
+            return line_rows[0][0]
+        if pos.x() >= line_rows[-1][1].right():
+            return line_rows[-1][0]
+        return min(line_rows, key=lambda item: abs(item[1].center().x() - pos.x()))[0]
 
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
@@ -542,8 +583,7 @@ class TranscriptView(QListView):
             return
 
         pos = event.position().toPoint()
-        index = self.indexAt(pos)
-        row = index.row() if index.isValid() else -1
+        row = self._row_at_pos(pos)
         self._press_row = row
         self._drag_selecting = False
         self._suppress_clicked = False
@@ -561,10 +601,12 @@ class TranscriptView(QListView):
         if row < 0:
             if not ctrl:
                 sm.clearSelection()
+            self._select_anchor = None
             self.setFocus(Qt.FocusReason.MouseFocusReason)
             event.accept()
             return
 
+        index = self._model.index(row)
         selectable = bool(
             self._model.flags(index) & Qt.ItemFlag.ItemIsSelectable
         )
@@ -573,11 +615,11 @@ class TranscriptView(QListView):
             if selectable:
                 sm.select(index, sm.SelectionFlag.Toggle)
                 self._select_anchor = row
-            self.setCurrentIndex(index)
+            sm.setCurrentIndex(index, sm.SelectionFlag.NoUpdate)
         elif shift:
             anchor = self._select_anchor if self._select_anchor is not None else row
             self._select_row_range(anchor, row, clear=True)
-            self.setCurrentIndex(index)
+            sm.setCurrentIndex(index, sm.SelectionFlag.NoUpdate)
             self._drag_selecting = True
         else:
             self._select_anchor = row
@@ -585,7 +627,7 @@ class TranscriptView(QListView):
                 sm.select(index, sm.SelectionFlag.ClearAndSelect)
             else:
                 sm.clearSelection()
-            self.setCurrentIndex(index)
+            sm.setCurrentIndex(index, sm.SelectionFlag.NoUpdate)
             self._drag_selecting = True
 
         self.setFocus(Qt.FocusReason.MouseFocusReason)
@@ -597,12 +639,16 @@ class TranscriptView(QListView):
             and event.buttons() & Qt.MouseButton.LeftButton
             and self._select_anchor is not None
         ):
-            row = self._row_at_pos(event.position().toPoint())
+            pos = event.position().toPoint()
+            row = self._row_at_pos(pos)
             if row >= 0:
                 if row != self._press_row:
                     self._suppress_clicked = True
                 self._select_row_range(self._select_anchor, row, clear=True)
-                self.setCurrentIndex(self._model.index(row))
+                sm = self.selectionModel()
+                index = self._model.index(row)
+                sm.setCurrentIndex(index, sm.SelectionFlag.NoUpdate)
+                self.scrollTo(index)
             event.accept()
             return
         super().mouseMoveEvent(event)
