@@ -79,6 +79,22 @@ def extract_audio(
     return out_path
 
 
+def extract_frame(media_path: str, at_sec: float, out_path: str) -> str:
+    """Extract one representative frame from a source media file."""
+    ffmpeg = find_ffmpeg()
+    subprocess.run(
+        [
+            ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-ss",
+            f"{max(0.0, at_sec):.3f}", "-i", media_path, "-frames:v", "1",
+            "-update", "1", out_path,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return out_path
+
+
 def probe_duration(media_path: str) -> float:
     ffprobe = _find_tool("ffprobe")
     if not ffprobe:

@@ -57,7 +57,14 @@ show long gaps; struck = will be trimmed.
 **Create Captions**. Press Return in the transcript to add a caption break before
 the selected or focused word; Backspace merges breaks, and undo/redo is supported.
 Style and preview Text+ titles, with auto-fit, word-by-word, hold-through-silence,
-and optional write-on. Best results come from a single compound clip.
+linked scale controls, and optional write-on. Fusion and compound timeline clips
+can be transcribed using audio rendered from their selected timeline range. To
+transcribe a compound clip's children separately and merge the results at their
+timeline positions, open the compound clip in its own timeline in Resolve,
+refresh Captain, then use **Transcribe Timeline…**. Select only clips that
+contain the dialogue you want. Merged timeline transcripts can be captioned on
+that open timeline; clip-level Apply is disabled because the transcript spans
+multiple source clips.
 
 **Script colors:** white = match · blue = in script only · magenta = in video
 only · red = mismatch · gray strikethrough = removed.

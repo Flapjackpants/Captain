@@ -154,22 +154,28 @@ class BridgeClient:
                 pass
             self._sock = None
 
-    def call(self, method: str, params: dict | None = None) -> Any:
+    def call(self, method: str, params: dict | None = None, *, timeout: float | None = None) -> Any:
         if self._sock is None:
             raise BridgeError("Bridge client is not connected")
         with self._lock:
-            req_id = self._next_id
-            self._next_id += 1
-            self._sock.sendall(_encode({"id": req_id, "method": method, "params": params or {}}))
-            while True:
-                msg = _read_message(self._sock, self._buf)
-                if msg is None:
-                    raise BridgeError("Bridge connection closed by Resolve host")
-                if msg.get("id") != req_id:
-                    continue
-                if "error" in msg:
-                    raise BridgeError(msg["error"].get("message", "Unknown bridge error"))
-                return msg.get("result")
+            previous_timeout = self._sock.gettimeout()
+            try:
+                if timeout is not None:
+                    self._sock.settimeout(timeout)
+                req_id = self._next_id
+                self._next_id += 1
+                self._sock.sendall(_encode({"id": req_id, "method": method, "params": params or {}}))
+                while True:
+                    msg = _read_message(self._sock, self._buf)
+                    if msg is None:
+                        raise BridgeError("Bridge connection closed by Resolve host")
+                    if msg.get("id") != req_id:
+                        continue
+                    if "error" in msg:
+                        raise BridgeError(msg["error"].get("message", "Unknown bridge error"))
+                    return msg.get("result")
+            finally:
+                self._sock.settimeout(previous_timeout)
 
 
 # ---- file transport (Lua Scripts host on Resolve Free) --------------------
@@ -214,7 +220,7 @@ class FileBridgeClient:
     def close(self) -> None:
         self._connected = False
 
-    def call(self, method: str, params: dict | None = None) -> Any:
+    def call(self, method: str, params: dict | None = None, *, timeout: float | None = None) -> Any:
         if not self._connected and method != "auth":
             raise BridgeError("File bridge client is not connected")
         with self._lock:
@@ -230,7 +236,7 @@ class FileBridgeClient:
             tmp.write_text(json.dumps(payload))
             tmp.replace(self.request_path)
 
-            deadline = time.time() + self.timeout
+            deadline = time.time() + (timeout if timeout is not None else self.timeout)
             while time.time() < deadline:
                 if self.response_path.is_file():
                     try:
@@ -252,4 +258,3 @@ class FileBridgeClient:
                     return msg.get("result")
                 time.sleep(0.02)
             raise BridgeError(f"Timed out waiting for bridge method {method!r}")
-

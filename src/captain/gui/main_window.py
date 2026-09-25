@@ -14,11 +14,15 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -43,8 +47,14 @@ from ..compare import (
     merge_repeat_groups,
     parse_script,
 )
-from ..engine import Transcriber, extract_audio
-from ..transcript import Transcript, SILENCE_DISPLAY_MIN, find_repeats, find_silence_gaps
+from ..engine import Transcriber, extract_audio, extract_frame
+from ..transcript import (
+    Transcript,
+    SILENCE_DISPLAY_MIN,
+    find_repeats,
+    find_silence_gaps,
+    merge_timeline_transcripts,
+)
 from .script_view import ScriptView
 from .caption_dialog import CaptionSettingsDialog
 from .settings_dialog import SettingsDialog
@@ -73,6 +83,7 @@ class TranscribeWorker(QThread):
         clip: ClipInfo,
         transcriber: Transcriber,
         language,
+        resolve,
         parent=None,
         *,
         initial_prompt: str | None = None,
@@ -81,25 +92,129 @@ class TranscribeWorker(QThread):
         self.clip = clip
         self.transcriber = transcriber
         self.language = language
+        self.resolve = resolve
         self.initial_prompt = initial_prompt
 
     def run(self) -> None:
         try:
-            self.progress.emit(0.0, "Extracting audio...")
-            wav = extract_audio(
-                self.clip.file_path,
-                start_sec=self.clip.source_start_sec,
-                duration_sec=self.clip.duration_sec,
-            )
-            transcript = self.transcriber.transcribe(
-                wav,
-                language=self.language,
-                progress=lambda f, m: self.progress.emit(f, m),
-                initial_prompt=self.initial_prompt,
-            )
+            with tempfile.TemporaryDirectory(prefix="captain_transcribe_") as tmp:
+                if self.clip.file_path:
+                    self.progress.emit(0.0, "Extracting audio...")
+                    wav = extract_audio(
+                        self.clip.file_path,
+                        start_sec=self.clip.source_start_sec,
+                        duration_sec=self.clip.duration_sec,
+                        out_path=str(Path(tmp) / "clip.wav"),
+                    )
+                else:
+                    self.progress.emit(0.0, "Rendering selected timeline audio in Resolve...")
+                    try:
+                        rendered_media = self.resolve.render_clip_audio(
+                            self.clip, str(Path(tmp) / "timeline-audio.wav")
+                        )
+                    except Exception as e:
+                        raise RuntimeError(
+                            f"Could not render audio for '{self.clip.name}' in Resolve: {e}"
+                        ) from e
+                    if Path(rendered_media).suffix.lower() == ".wav":
+                        wav = rendered_media
+                    else:
+                        self.progress.emit(0.0, "Extracting audio from Resolve render...")
+                        wav = extract_audio(
+                            rendered_media,
+                            out_path=str(Path(tmp) / "timeline-audio.wav"),
+                        )
+                transcript = self.transcriber.transcribe(
+                    wav,
+                    language=self.language,
+                    progress=lambda f, m: self.progress.emit(f, m),
+                    initial_prompt=self.initial_prompt,
+                )
+                transcript.source_path = self.clip.file_path or f"timeline:{self.clip.clip_id}"
             self.finished_ok.emit(transcript)
         except Exception as e:  # surfaced to the user in the UI
             log.error("Transcription failed: %s", traceback.format_exc())
+            self.failed.emit(str(e))
+
+
+class TimelineTranscribeWorker(QThread):
+    progress = Signal(float, str)
+    finished_ok = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        clips: list[ClipInfo],
+        transcriber: Transcriber,
+        language: str,
+        resolve,
+        timeline_start_frame: int,
+        fps: float,
+        timeline_name: str,
+        parent=None,
+        *,
+        initial_prompt: str | None = None,
+    ):
+        super().__init__(parent)
+        self.clips = sorted(clips, key=lambda clip: (clip.timeline_start_frame, clip.track_index))
+        self.transcriber = transcriber
+        self.language = language
+        self.resolve = resolve
+        self.timeline_start_frame = timeline_start_frame
+        self.fps = fps
+        self.timeline_name = timeline_name
+        self.initial_prompt = initial_prompt
+
+    def run(self) -> None:
+        try:
+            parts: list[tuple[Transcript, float]] = []
+            end_frame = self.timeline_start_frame
+            with tempfile.TemporaryDirectory(prefix="captain_timeline_transcribe_") as tmp:
+                for index, clip in enumerate(self.clips):
+                    self.progress.emit(
+                        index / len(self.clips),
+                        f"Transcribing {index + 1}/{len(self.clips)}: {clip.name}",
+                    )
+                    clip_dir = Path(tmp) / str(index)
+                    clip_dir.mkdir()
+                    if clip.file_path:
+                        wav = extract_audio(
+                            clip.file_path,
+                            start_sec=clip.source_start_sec,
+                            duration_sec=clip.duration_sec,
+                            out_path=str(clip_dir / "clip.wav"),
+                        )
+                    else:
+                        rendered_media = self.resolve.render_clip_audio(
+                            clip, str(clip_dir / "timeline-audio.wav")
+                        )
+                        if Path(rendered_media).suffix.lower() == ".wav":
+                            wav = rendered_media
+                        else:
+                            wav = extract_audio(
+                                rendered_media,
+                                out_path=str(clip_dir / "clip.wav"),
+                            )
+                    transcript = self.transcriber.transcribe(
+                        wav,
+                        language=self.language,
+                        progress=lambda fraction, message, i=index: self.progress.emit(
+                            (i + fraction) / len(self.clips),
+                            f"{self.clips[i].name}: {message}",
+                        ),
+                        initial_prompt=self.initial_prompt,
+                    )
+                    offset = (clip.timeline_start_frame - self.timeline_start_frame) / self.fps
+                    parts.append((transcript, offset))
+                    end_frame = max(end_frame, clip.timeline_end_frame)
+            merged = merge_timeline_transcripts(
+                parts,
+                duration=(end_frame - self.timeline_start_frame) / self.fps,
+                source_path=f"timeline:{self.timeline_name}",
+            )
+            self.finished_ok.emit(merged)
+        except Exception as e:
+            log.error("Timeline transcription failed: %s", traceback.format_exc())
             self.failed.emit(str(e))
 
 
@@ -118,6 +233,9 @@ class MainWindow(QMainWindow):
         )
         self.clips: list[ClipInfo] = []
         self.current_clip: ClipInfo | None = None
+        self._caption_anchor_clip: ClipInfo | None = None
+        self._timeline_batch_mode = False
+        self._pre_batch_context: tuple[ClipInfo | None, ClipInfo | None, bool] | None = None
         self.worker: TranscribeWorker | None = None
         self._search_matches: list[int] = []
         self._search_pos: int = -1
@@ -150,6 +268,11 @@ class MainWindow(QMainWindow):
         self.clip_combo.currentIndexChanged.connect(self._on_clip_combo_changed)
         self.transcribe_btn = QPushButton("Transcribe")
         self.transcribe_btn.clicked.connect(self._transcribe)
+        self.transcribe_timeline_btn = QPushButton("Transcribe Timeline…")
+        self.transcribe_timeline_btn.setToolTip(
+            "Open a compound clip in its own timeline, refresh, then transcribe its child clips separately"
+        )
+        self.transcribe_timeline_btn.clicked.connect(self._transcribe_timeline)
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self._load_clips)
         self.import_script_btn = QPushButton("Import Script…")
@@ -176,6 +299,7 @@ class MainWindow(QMainWindow):
         top.addWidget(self.playhead_btn)
         top.addWidget(self.clip_combo, stretch=1)
         top.addWidget(self.transcribe_btn)
+        top.addWidget(self.transcribe_timeline_btn)
         top.addWidget(self.refresh_btn)
         top.addWidget(self.import_script_btn)
         top.addWidget(self.clear_script_btn)
@@ -335,13 +459,13 @@ class MainWindow(QMainWindow):
             self.trim_silence_btn,
             self.trim_repeats_btn,
             self.create_captions_btn,
-            self.apply_btn,
             self.search_edit,
             self.search_prev_btn,
             self.search_next_btn,
             self.export_state_btn,
         ):
             widget.setEnabled(on)
+        self.apply_btn.setEnabled(on and not self._timeline_batch_mode)
 
     def _status(self, message: str) -> None:
         self.statusBar().showMessage(message)
@@ -392,7 +516,7 @@ class MainWindow(QMainWindow):
             if not self.resolve.connected:
                 return
         try:
-            self.clips = [c for c in self.resolve.list_clips() if c.file_path]
+            self.clips = self.resolve.list_clips()
         except Exception as e:
             QMessageBox.warning(self, "Captain", f"Could not list clips:\n{e}")
             return
@@ -432,15 +556,18 @@ class MainWindow(QMainWindow):
         return -1
 
     def _select_clip_in_combo(self, clip: ClipInfo) -> None:
+        self._timeline_batch_mode = False
         idx = self._find_clip_index(clip)
         self.clip_combo.blockSignals(True)
         if idx >= 0:
             # Prefer the listed clip object so combo data stays consistent.
             self.current_clip = self.clips[idx]
+            self._caption_anchor_clip = self.current_clip
             self.clip_combo.setCurrentIndex(idx)
         else:
             self.clips.append(clip)
             self.current_clip = clip
+            self._caption_anchor_clip = clip
             self.clip_combo.addItem(self._clip_label(clip), clip.clip_id)
             self.clip_combo.setCurrentIndex(self.clip_combo.count() - 1)
         self.clip_combo.blockSignals(False)
@@ -448,7 +575,15 @@ class MainWindow(QMainWindow):
     def _on_clip_combo_changed(self, index: int) -> None:
         if index < 0 or index >= len(self.clips):
             return
+        if self._timeline_batch_mode:
+            anchor_index = self._find_clip_index(self._caption_anchor_clip) if self._caption_anchor_clip else -1
+            if anchor_index >= 0 and anchor_index != index:
+                self.clip_combo.blockSignals(True)
+                self.clip_combo.setCurrentIndex(anchor_index)
+                self.clip_combo.blockSignals(False)
+            return
         self.current_clip = self.clips[index]
+        self._caption_anchor_clip = self.current_clip
 
     def _use_playhead_clip(self) -> None:
         if not self.resolve.connected:
@@ -497,7 +632,8 @@ class MainWindow(QMainWindow):
 
     def _session_path(self, clip: ClipInfo) -> Path:
         key = hashlib.sha1(
-            f"{clip.file_path}:{clip.source_start_frame}:{clip.source_end_frame}".encode()
+            f"{clip.file_path}:{clip.clip_id}:{clip.timeline_start_frame}:"
+            f"{clip.timeline_end_frame}:{clip.source_start_frame}:{clip.source_end_frame}".encode()
         ).hexdigest()[:16]
         return config.sessions_dir() / f"{key}.json"
 
@@ -615,6 +751,9 @@ class MainWindow(QMainWindow):
             )
             return
         self.current_clip = self.clips[row]
+        self._caption_anchor_clip = self.current_clip
+        self._timeline_batch_mode = False
+        self._pre_batch_context = None
 
         session = self._session_path(self.current_clip)
         if session.exists():
@@ -652,6 +791,128 @@ class MainWindow(QMainWindow):
             self.current_clip,
             self.transcriber,
             self.cfg["language"],
+            self.resolve,
+            initial_prompt=prompt,
+        )
+        self.worker.progress.connect(self._on_progress)
+        self.worker.finished_ok.connect(self._on_transcribed)
+        self.worker.failed.connect(self._on_transcribe_failed)
+        self.worker.start()
+
+    def _transcribe_timeline(self) -> None:
+        if not self.resolve.connected:
+            self._connect_resolve()
+            if not self.resolve.connected:
+                return
+        if not self.clips:
+            self._load_clips()
+        candidates = list(self.clips)
+        if not candidates:
+            QMessageBox.information(self, "Transcribe Timeline", "The open timeline has no clips.")
+            return
+        has_path_backed_video = any(
+            clip.track_type == "video" and clip.file_path for clip in candidates
+        )
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Transcribe Open Timeline")
+        layout = QVBoxLayout(dialog)
+        hint = QLabel(
+            "For a compound clip, open it in its own timeline in Resolve first, then refresh Captain. "
+            "Each selected child clip is transcribed from its source and merged at its timeline position. "
+            "Select only clips that contain the dialogue you want."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        clip_list = QListWidget(dialog)
+        for clip in candidates:
+            item = QListWidgetItem(self._clip_label(clip))
+            item.setData(Qt.ItemDataRole.UserRole, clip.clip_id)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            checked = bool(clip.file_path) and (
+                clip.track_type == "video" or not has_path_backed_video
+            )
+            item.setCheckState(
+                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            )
+            if not clip.file_path:
+                item.setToolTip("No source path; including it requires Resolve to render this child clip.")
+            clip_list.addItem(item)
+        layout.addWidget(clip_list)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        selected_ids = {
+            clip_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(clip_list.count())
+            if clip_list.item(i).checkState() == Qt.CheckState.Checked
+        }
+        selected = [clip for clip in candidates if clip.clip_id in selected_ids]
+        if not selected:
+            QMessageBox.information(self, "Transcribe Timeline", "Select at least one clip.")
+            return
+        selected.sort(key=lambda clip: (clip.timeline_start_frame, clip.track_index))
+        fps = selected[0].fps
+        if fps <= 0:
+            QMessageBox.warning(self, "Transcribe Timeline", "Resolve reported an invalid timeline frame rate.")
+            return
+        start_frame = min(clip.timeline_start_frame for clip in selected)
+        end_frame = max(clip.timeline_end_frame for clip in selected)
+        anchor = next((clip for clip in selected if clip.track_type == "video"), selected[0])
+        try:
+            timeline_name = self.resolve.timeline_name()
+        except Exception:
+            timeline_name = "Open Timeline"
+        digest = hashlib.sha1("|".join(clip.clip_id for clip in selected).encode()).hexdigest()[:16]
+        aggregate = ClipInfo(
+            clip_id=f"timeline:{digest}",
+            name=timeline_name,
+            track_type=anchor.track_type,
+            track_index=anchor.track_index,
+            timeline_start_frame=start_frame,
+            timeline_end_frame=end_frame,
+            source_start_frame=0,
+            source_end_frame=end_frame - start_frame,
+            file_path="",
+            fps=fps,
+        )
+        self._pre_batch_context = (
+            self.current_clip,
+            self._caption_anchor_clip,
+            self._timeline_batch_mode,
+        )
+        self.current_clip = aggregate
+        self._caption_anchor_clip = anchor
+        self._timeline_batch_mode = True
+        anchor_index = self._find_clip_index(anchor)
+        if anchor_index >= 0:
+            self.clip_combo.blockSignals(True)
+            self.clip_combo.setCurrentIndex(anchor_index)
+            self.clip_combo.blockSignals(False)
+        self.transcribe_btn.setEnabled(False)
+        self.transcribe_timeline_btn.setEnabled(False)
+        self.transcribe_timeline_btn.setEnabled(False)
+        self._show_progress(True)
+        prompt = None
+        if self._alignment is not None:
+            prompt = self._alignment.vocabulary_prompt() or None
+        elif self._script_tokens:
+            prompt = AlignmentResult(script_tokens=self._script_tokens).vocabulary_prompt() or None
+        self.worker = TimelineTranscribeWorker(
+            selected,
+            self.transcriber,
+            self.cfg["language"],
+            self.resolve,
+            start_frame,
+            fps,
+            timeline_name,
             initial_prompt=prompt,
         )
         self.worker.progress.connect(self._on_progress)
@@ -674,6 +935,8 @@ class MainWindow(QMainWindow):
 
     def _on_transcribed(self, transcript: Transcript) -> None:
         self.transcribe_btn.setEnabled(True)
+        self.transcribe_timeline_btn.setEnabled(True)
+        self._pre_batch_context = None
         self._show_progress(False)
         if self.view.transcript and self.view.transcript.script_text:
             transcript.script_text = self.view.transcript.script_text
@@ -684,6 +947,11 @@ class MainWindow(QMainWindow):
 
     def _on_transcribe_failed(self, message: str) -> None:
         self.transcribe_btn.setEnabled(True)
+        self.transcribe_timeline_btn.setEnabled(True)
+        if self._pre_batch_context is not None:
+            self.current_clip, self._caption_anchor_clip, self._timeline_batch_mode = self._pre_batch_context
+        self._pre_batch_context = None
+        self._set_editing_enabled(self.view.transcript is not None)
         self._show_progress(False)
         QMessageBox.critical(self, "Captain", f"Transcription failed:\n{message}")
 
@@ -717,7 +985,7 @@ class MainWindow(QMainWindow):
             self._on_search_text(self.search_edit.text())
         self._status(
             f"{len(transcript.words)} words • {transcript.duration:.1f}s • "
-            "edit, then Apply"
+            + ("edit, then Create Captions" if self._timeline_batch_mode else "edit, then Apply")
         )
 
     def _create_captions(self) -> None:
@@ -754,16 +1022,32 @@ class MainWindow(QMainWindow):
 
         timeline_info: dict = {"width": 1920, "height": 1080}
         preview = QPixmap()
+        preview_source = "neutral"
         try:
             timeline_info = self.resolve.timeline_info()
             with tempfile.TemporaryDirectory(prefix="captain_caption_preview_") as tmp:
                 image_path = str(Path(tmp) / "timeline-frame.png")
-                captured_path = self.resolve.capture_current_frame(image_path)
+                try:
+                    captured_path = self.resolve.capture_current_frame(image_path)
+                except Exception as capture_error:
+                    log.warning("Could not capture Resolve timeline frame: %s", capture_error)
+                    captured_path = None
                 if captured_path:
                     preview_path = (
                         captured_path if isinstance(captured_path, str) else image_path
                     )
                     preview = QPixmap(preview_path)
+                    if not preview.isNull():
+                        preview_source = "timeline"
+                if preview.isNull() and clip.file_path:
+                    frame_path = str(Path(tmp) / "clip-frame.png")
+                    midpoint = clip.source_start_sec + clip.duration_sec / 2.0
+                    try:
+                        preview = QPixmap(extract_frame(clip.file_path, midpoint, frame_path))
+                        if not preview.isNull():
+                            preview_source = "clip"
+                    except Exception as frame_error:
+                        log.warning("Could not extract selected clip preview frame: %s", frame_error)
         except Exception as e:
             log.warning("Could not capture Resolve preview frame: %s", e)
 
@@ -774,7 +1058,8 @@ class MainWindow(QMainWindow):
             preview_texts,
             word_texts,
             saved,
-            self,
+            parent=self,
+            preview_source=preview_source,
         )
         if dlg.exec() != dlg.DialogCode.Accepted:
             return
@@ -797,7 +1082,7 @@ class MainWindow(QMainWindow):
         config.save_config(self.cfg)
         try:
             count = self.resolve.create_captions(
-                clip,
+                self._caption_anchor_clip or clip,
                 [segment.to_dict() for segment in captions],
                 settings,
             )
@@ -1062,9 +1347,15 @@ class MainWindow(QMainWindow):
         if self.current_clip is None:
             return
         try:
-            self.resolve.jump_to_clip_second(
-                self.current_clip, self.current_clip.source_start_sec + media_sec
-            )
+            if self._timeline_batch_mode:
+                frame = self.current_clip.timeline_start_frame + int(
+                    media_sec * self.current_clip.fps
+                )
+                self.resolve.jump_to_timeline_frame(frame)
+            else:
+                self.resolve.jump_to_clip_second(
+                    self.current_clip, self.current_clip.source_start_sec + media_sec
+                )
         except ResolveError as e:
             self._status(str(e))
 
@@ -1074,6 +1365,13 @@ class MainWindow(QMainWindow):
         transcript = self.view.transcript
         clip = self.current_clip
         if transcript is None or clip is None:
+            return
+        if self._timeline_batch_mode:
+            QMessageBox.information(
+                self,
+                "Apply",
+                "Timeline transcripts combine several source clips. Use Create Captions to place the merged transcript on the open timeline.",
+            )
             return
         keep = transcript.keep_ranges()
         if not keep:

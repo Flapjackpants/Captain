@@ -45,6 +45,16 @@ def test_caption_dialog_previews_project_frame_and_retains_style_settings(qapp):
     assert dialog.values()["font_size"] == 100
     assert dialog.values()["auto_fit"] is False
 
+    assert dialog.link_scale.isChecked()
+    dialog.scale_y.setValue(1.35)
+    assert dialog.scale_x.value() == pytest.approx(1.35)
+    assert dialog.values()["scale_x"] == pytest.approx(1.35)
+    assert dialog.values()["scale_y"] == pytest.approx(1.35)
+    dialog.link_scale.setChecked(False)
+    dialog.scale_y.setValue(0.75)
+    assert dialog.scale_x.value() == pytest.approx(1.35)
+    assert dialog.scale_y.value() == pytest.approx(0.75)
+
     dialog.word_by_word.setChecked(True)
     assert dialog.preview.texts == ["This", "is", "the", "longest", "caption"]
     assert dialog.preview_combo.count() == 6

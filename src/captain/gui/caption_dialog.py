@@ -14,6 +14,8 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QPixmap,
+    QTextLayout,
+    QTextOption,
 )
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -188,15 +190,51 @@ class CaptionPreview(QWidget):
             "center": Qt.AlignmentFlag.AlignVCenter,
             "bottom": Qt.AlignmentFlag.AlignBottom,
         }.get(str(s.get("vertical_alignment", "center")), Qt.AlignmentFlag.AlignVCenter)
-        flags = self._alignment_flag() | vertical
-        if s.get("layout_type", "Frame") == "Frame":
-            flags |= Qt.TextFlag.TextWordWrap
-        text_rect = QFontMetricsF(font).boundingRect(safe.toRect(), flags, text)
-        alignment = flags
+        text_layout = QTextLayout(text, font)
+        text_option = QTextOption()
+        text_option.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        text_option.setWrapMode(
+            QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere
+            if s.get("layout_type", "Frame") == "Frame"
+            else QTextOption.WrapMode.NoWrap
+        )
+        text_layout.setTextOption(text_option)
+        text_layout.beginLayout()
+        lines = []
+        y_line = 0.0
+        while True:
+            line = text_layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(safe.width())
+            if self._alignment_flag() == Qt.AlignmentFlag.AlignLeft:
+                line_x = 0.0
+            elif self._alignment_flag() == Qt.AlignmentFlag.AlignRight:
+                line_x = max(0.0, safe.width() - line.naturalTextWidth())
+            else:
+                line_x = max(0.0, (safe.width() - line.naturalTextWidth()) / 2.0)
+            line.setPosition(QPointF(line_x, y_line))
+            y_line += line.height() * float(s.get("line_spacing", 1.0))
+            lines.append(line)
+        text_layout.endLayout()
+        content_height = y_line
+        if vertical == Qt.AlignmentFlag.AlignVCenter:
+            y_offset = max(0.0, (safe.height() - content_height) / 2.0)
+        elif vertical == Qt.AlignmentFlag.AlignBottom:
+            y_offset = max(0.0, safe.height() - content_height)
+        else:
+            y_offset = 0.0
+        glyph_path = QPainterPath()
+        for line in lines:
+            line_y = line.position().y() + y_offset
+            glyph_path.addText(
+                safe.left() + line.position().x(),
+                safe.top() + line_y + line.ascent(),
+                font,
+                text[line.textStart() : line.textStart() + line.textLength()],
+            )
         outline = float(s.get("outline_width", 0.0)) if s.get("outline_enabled") else 0.0
         if outline > 0:
-            path = QPainterPath()
-            path.addText(text_rect.left(), text_rect.top() + QFontMetricsF(font).ascent(), font, text)
             if s.get("shadow_enabled"):
                 shadow = QColor(str(s.get("shadow_color", "#000000")))
                 shadow.setAlphaF(float(s.get("shadow_opacity", 0.65)))
@@ -204,7 +242,7 @@ class CaptionPreview(QWidget):
                 p.translate(max(1.0, outline), max(1.0, outline))
                 p.setPen(QPen(shadow, outline))
                 p.setBrush(shadow)
-                p.drawPath(path)
+                p.drawPath(glyph_path)
                 p.restore()
             outline_color = QColor(str(s.get("outline_color", "#000000")))
             outline_color.setAlphaF(float(s.get("outline_opacity", 1.0)))
@@ -212,22 +250,20 @@ class CaptionPreview(QWidget):
             pen.setWidthF(outline)
             p.setPen(pen)
             p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawPath(path)
+            p.drawPath(glyph_path)
         elif s.get("shadow_enabled"):
-            path = QPainterPath()
-            path.addText(text_rect.left(), text_rect.top() + QFontMetricsF(font).ascent(), font, text)
             shadow = QColor(str(s.get("shadow_color", "#000000")))
             shadow.setAlphaF(float(s.get("shadow_opacity", 0.65)))
             p.save()
             p.translate(3, 3)
             p.setPen(QPen(shadow, 3))
             p.setBrush(shadow)
-            p.drawPath(path)
+            p.drawPath(glyph_path)
             p.restore()
         color = QColor(str(s.get("text_color", "#FFFFFF")))
         color.setAlphaF(float(s.get("image_opacity", 1.0)))
         p.setPen(color)
-        p.drawText(safe, alignment, text)
+        text_layout.draw(p, QPointF(safe.left(), safe.top() + y_offset))
         p.restore()
         p.setPen(QColor("#a2a2aa"))
         p.drawText(QRect(target.left(), target.bottom() + 4, target.width(), 20), Qt.AlignmentFlag.AlignCenter,
@@ -244,6 +280,7 @@ class CaptionSettingsDialog(QDialog):
         word_texts: list[str],
         settings: dict[str, Any] | None = None,
         parent=None,
+        preview_source: str = "timeline",
     ):
         super().__init__(parent)
         self.setWindowTitle("Create Captions · Text+")
@@ -264,7 +301,12 @@ class CaptionSettingsDialog(QDialog):
         self.preview = CaptionPreview(width, height, preview_pixmap)
         left = QVBoxLayout()
         preview_head = QHBoxLayout()
-        preview_head.addWidget(QLabel("Preview at project resolution"))
+        preview_label = "Preview at project resolution"
+        if preview_source == "clip":
+            preview_label += " · selected clip frame"
+        elif preview_source == "neutral":
+            preview_label += " · neutral background (no frame available)"
+        preview_head.addWidget(QLabel(preview_label))
         preview_head.addStretch(1)
         self.preview_combo = QComboBox()
         self.preview_combo.addItem("Longest caption", -1)
@@ -311,6 +353,26 @@ class CaptionSettingsDialog(QDialog):
         if key == "font_size" and self._values.get("auto_fit"):
             self._values["auto_fit"] = False
             self.auto_fit.setChecked(False)
+        self._refresh_preview()
+
+    def _set_scale_link(self, linked: bool) -> None:
+        self._values["link_scale"] = linked
+        if linked:
+            self.scale_y.blockSignals(True)
+            self.scale_y.setValue(self.scale_x.value())
+            self.scale_y.blockSignals(False)
+            self._values["scale_y"] = self.scale_x.value()
+        self._refresh_preview()
+
+    def _scale_changed(self, key: str, value: float) -> None:
+        self._values[key] = value
+        if self._values.get("link_scale"):
+            other = self.scale_y if key == "scale_x" else self.scale_x
+            other.blockSignals(True)
+            other.setValue(value)
+            other.blockSignals(False)
+            self._values["scale_x"] = value
+            self._values["scale_y"] = value
         self._refresh_preview()
 
     def _form_tab(self, title: str) -> tuple[QWidget, QFormLayout]:
@@ -401,8 +463,16 @@ class CaptionSettingsDialog(QDialog):
             control = self._spin(key, minv=0.0, maxv=1.0, step=0.01, decimals=3)
             setattr(self, key, control)
             form.addRow(label, control)
-        for key, label in (("scale_x", "Scale X"), ("scale_y", "Scale Y")):
-            form.addRow(label, self._spin(key, minv=0.01, maxv=10.0, step=0.05, decimals=2))
+        self.link_scale = QCheckBox("Link Scale X and Y")
+        self.link_scale.setChecked(bool(self._values["link_scale"]))
+        self.link_scale.toggled.connect(self._set_scale_link)
+        form.addRow(self.link_scale)
+        self.scale_x = self._spin("scale_x", minv=0.01, maxv=10.0, step=0.05, decimals=2)
+        self.scale_y = self._spin("scale_y", minv=0.01, maxv=10.0, step=0.05, decimals=2)
+        self.scale_x.valueChanged.connect(lambda value: self._scale_changed("scale_x", value))
+        self.scale_y.valueChanged.connect(lambda value: self._scale_changed("scale_y", value))
+        form.addRow("Scale X", self.scale_x)
+        form.addRow("Scale Y", self.scale_y)
         form.addRow("Rotation (degrees)", self._spin("rotation", minv=-360, maxv=360, step=1, decimals=1))
 
     def _pick_color(self, key: str, button: QPushButton) -> None:

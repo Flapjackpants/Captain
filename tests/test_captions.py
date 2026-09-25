@@ -73,3 +73,15 @@ def test_caption_setting_normalization_clamps_and_overlays_defaults():
     assert settings["write_on"] is True
     assert settings["hold_to_next"] is True
 
+
+def test_caption_scale_is_linked_by_default_and_x_is_authoritative():
+    settings = normalize_caption_settings({"scale_x": 1.4, "scale_y": 0.7})
+    assert settings["link_scale"] is True
+    assert settings["scale_y"] == pytest.approx(1.4)
+
+
+def test_caption_scale_can_be_unlinked():
+    settings = normalize_caption_settings(
+        {"scale_x": 1.4, "scale_y": 0.7, "link_scale": False}
+    )
+    assert settings["scale_y"] == pytest.approx(0.7)

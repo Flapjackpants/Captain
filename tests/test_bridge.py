@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -29,6 +30,7 @@ class FakeHost:
             )
         ]
         self.jumps: list[tuple[str, float]] = []
+        self.frame_jumps: list[int] = []
         self.imported: list[str] = []
         self.appended: list[tuple] = []
         self.replaced: list[tuple] = []
@@ -62,6 +64,9 @@ class FakeHost:
             return self.playhead_clip.to_dict()
         if method == "jump_to_clip_second":
             self.jumps.append((params["clip_id"], params["second_in_clip"]))
+            return True
+        if method == "jump_to_timeline_frame":
+            self.frame_jumps.append(params["frame"])
             return True
         if method == "import_timeline_xml":
             self.imported.append(params["xml_path"])
@@ -143,6 +148,8 @@ def test_bridged_handler_methods(bridge_pair):
     assert clips[0].clip_id == "video:1:0:0"
     handler.jump_to_clip_second(clips[0], 1.5)
     assert host.jumps == [("video:1:0:0", 1.5)]
+    handler.jump_to_timeline_frame(240)
+    assert host.frame_jumps == [240]
     assert handler.import_timeline_xml("/tmp/out.xml") is True
     assert host.imported == ["/tmp/out.xml"]
     assert handler.assemble_append(clips[0], [(0, 10), (20, 30)], "Cut") is True
@@ -334,6 +341,143 @@ def test_direct_caption_generation_uses_a_new_top_track_when_occupied():
     assert title.properties["FontSize"] == pytest.approx(96 / 1080)
     assert title.properties["ZoomX"] == pytest.approx(1.5)
     assert title.properties["AnchorPointY"] == pytest.approx(108.0)
+
+
+def test_caption_generation_places_textplus_when_exact_title_api_is_missing():
+    class Item:
+        def __init__(self, start, end, source_start=0, source_end=0):
+            self.start, self.end = start, end
+            self.source_start = source_start
+            self.source_end = source_end
+            self.properties = {}
+            self.media_pool_item = object()
+
+        def GetStart(self):
+            return self.start
+
+        def GetEnd(self):
+            return self.end
+
+        def GetSourceStartFrame(self):
+            return self.source_start
+
+        def GetSourceEndFrame(self):
+            return self.source_end
+
+        def GetMediaPoolItem(self):
+            return None
+
+        def GetFusionCompCount(self):
+            return 1
+
+        def ExportFusionComp(self, path, _index):
+            Path(path).write_text("comp", encoding="utf-8")
+            return True
+
+        def ImportFusionComp(self, _path):
+            self.imported_comp = True
+            return object()
+
+        def SetProperty(self, key, value):
+            self.properties[key] = value
+            return True
+
+    class Timeline:
+        def __init__(self):
+            self.tracks = {1: []}
+            self.inserted = []
+            self.deleted = []
+
+        def GetTrackCount(self, _kind):
+            return len(self.tracks)
+
+        def GetItemListInTrack(self, _kind, index):
+            return self.tracks[index]
+
+        def GetSetting(self, key):
+            return {"timelineResolutionWidth": "1920", "timelineResolutionHeight": "1080"}.get(key)
+
+        def AddTrack(self, _kind):
+            self.tracks[len(self.tracks) + 1] = []
+            return True
+
+        def InsertFusionTitleIntoTimeline(self, name):
+            self.inserted.append(name)
+            return Item(0, 120, 0, 1000)
+
+        def SetCurrentTimecode(self, _timecode):
+            return True
+
+        def GetCurrentTimecode(self):
+            return "00:00:00:00"
+
+        def DeleteClips(self, items, _ripple):
+            self.deleted.extend(items)
+            return True
+
+        def DeleteTrack(self, _kind, index):
+            self.tracks.pop(index, None)
+            return True
+
+    class MediaPool:
+        def __init__(self, timeline):
+            self.timeline = timeline
+            self.requests = []
+
+        def AppendToTimeline(self, infos):
+            info = infos[0]
+            self.requests.append(dict(info))
+            title = Item(info["recordFrame"], info["recordFrame"] + (
+                info["endFrame"] - info["startFrame"]
+            ))
+            self.timeline.tracks[info["trackIndex"]].append(title)
+            return [title]
+
+        def ImportMedia(self, paths):
+            self.imported_paths = list(paths)
+            return [object()]
+
+    timeline = Timeline()
+    media_pool = MediaPool(timeline)
+
+    class Project:
+        def __init__(self):
+            self.timeline = timeline
+
+        def GetCurrentTimeline(self):
+            return timeline
+
+        def GetMediaPool(self):
+            return media_pool
+
+    class ProjectManager:
+        def GetCurrentProject(self):
+            return Project()
+
+    handler = ResolveHandler()
+    handler.resolve = type(
+        "Resolve", (), {"GetProjectManager": lambda _self: ProjectManager()}
+    )()
+    clip = ClipInfo(
+        clip_id="video:1:0:0", name="Compound", track_type="video", track_index=1,
+        timeline_start_frame=0, timeline_end_frame=100,
+        source_start_frame=0, source_end_frame=100, file_path="", fps=24,
+    )
+    handler._clips[clip.clip_id] = clip
+
+    count = handler.create_captions(
+        clip,
+        [{"text": "Hello", "start_frame": 40, "end_frame": 55, "write_on_end_frame": 40}],
+        {"write_on": False},
+    )
+
+    assert count == 1
+    assert timeline.inserted == ["Text+"]
+    assert media_pool.requests[0]["recordFrame"] == 40
+    assert media_pool.requests[0]["trackIndex"] == 1
+    assert timeline.tracks[1][0].start == 40
+    assert timeline.tracks[1][0].end == 55
+    assert timeline.deleted
 
 
 def test_capture_current_frame_resolves_resolve_exported_filename(tmp_path):

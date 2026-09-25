@@ -147,6 +147,7 @@ class Transcript:
             )
         return out
 
+
     def find_matches(self, query: str, *, skip_removed: bool = True) -> list[int]:
         """Return word indices (in order) whose text contains query (case-insensitive)."""
         q = query.strip().lower()
@@ -292,6 +293,49 @@ class Transcript:
         if clean:
             transcript.reset_edits()
         return transcript
+
+
+def merge_timeline_transcripts(
+    parts: list[tuple[Transcript, float]],
+    *,
+    duration: float,
+    source_path: str = "",
+) -> Transcript:
+    """Merge per-clip transcripts using each clip's offset in its timeline.
+
+    ``parts`` contains ``(transcript, offset_seconds)`` pairs. Words retain
+    their original order within each clip and are sorted into timeline order;
+    gaps between clips remain gaps in the combined transcript.
+    """
+    words: list[Word] = []
+    segment_offset = 0
+    for transcript, offset in sorted(parts, key=lambda part: part[1]):
+        segment_ids = sorted({word.segment_id for word in transcript.words})
+        segment_map = {
+            segment_id: segment_offset + i
+            for i, segment_id in enumerate(segment_ids)
+        }
+        for word in transcript.words:
+            words.append(
+                Word(
+                    index=len(words),
+                    text=word.text,
+                    start=max(0.0, word.start + offset),
+                    end=max(0.0, word.end + offset),
+                    segment_id=segment_map[word.segment_id],
+                )
+            )
+        segment_offset += len(segment_map)
+    words.sort(key=lambda word: (word.start, word.end, word.index))
+    words = [
+        Word(i, word.text, word.start, word.end, word.segment_id)
+        for i, word in enumerate(words)
+    ]
+    return Transcript(
+        words=words,
+        duration=max(0.0, duration),
+        source_path=source_path,
+    )
 
 
 # ---- auto-trim helpers ----------------------------------------------------

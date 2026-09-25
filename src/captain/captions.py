@@ -39,6 +39,7 @@ DEFAULT_CAPTION_SETTINGS: dict[str, Any] = {
     "anchor_y": 0.5,
     "scale_x": 1.0,
     "scale_y": 1.0,
+    "link_scale": True,
     "rotation": 0.0,
     "tracking": 1.0,
     "line_spacing": 1.0,
@@ -64,6 +65,9 @@ def normalize_caption_settings(settings: dict[str, Any] | None) -> dict[str, Any
         out[key] = min(1.0, max(0.0, float(out[key])))
     for key in ("scale_x", "scale_y"):
         out[key] = max(0.01, float(out[key]))
+    out["link_scale"] = bool(out.get("link_scale", True))
+    if out["link_scale"]:
+        out["scale_y"] = out["scale_x"]
     for key in ("layout_width", "layout_height"):
         out[key] = min(2.0, max(0.01, float(out[key])))
     out["rotation"] = float(out["rotation"])

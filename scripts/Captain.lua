@@ -322,6 +322,7 @@ end
 -- ---- Resolve helpers -------------------------------------------------------
 
 local clips_by_id = {}
+local list_clips
 
 local function version_string()
     local ok, v = pcall(function()
@@ -433,6 +434,182 @@ local function capture_current_frame(image_path)
     return exported_path
 end
 
+local function render_clip_audio(clip_id, output_path)
+    local clip = clips_by_id[clip_id]
+    if not clip then
+        list_clips()
+        clip = clips_by_id[clip_id]
+    end
+    if not clip then
+        error("Unknown clip id " .. tostring(clip_id) .. ". Refresh the clip list.")
+    end
+    local start_f = safe_number(clip.timeline_start_frame, 0)
+    local end_f = safe_number(clip.timeline_end_frame, start_f)
+    if end_f <= start_f then
+        error("The selected timeline clip has no renderable duration.")
+    end
+    local normalized_path = output_path:gsub("\\\\", "/")
+    local folder = normalized_path:match("^(.*)/[^/]+$") or "."
+    local filename = normalized_path:match("([^/]+)$") or "timeline-audio.wav"
+    local prefix = filename:gsub("%.wav$", "")
+    mkdir_p(folder)
+    local project = current_project()
+    local previous_settings = nil
+    local previous_format, previous_codec = nil, nil
+    local job_id = nil
+    local ok, result = pcall(function()
+        pcall(function() previous_settings = project:GetRenderSettings() end)
+        pcall(function()
+            local current_format, current_codec = project:GetCurrentRenderFormatAndCodec()
+            if type(current_format) == "table" then
+                previous_format = current_format.format
+                previous_codec = current_format.codec
+            else
+                previous_format = current_format
+                previous_codec = current_codec
+            end
+        end)
+        local ok_formats, formats = pcall(function() return project:GetRenderFormats() end)
+        if not ok_formats or type(formats) ~= "table" then formats = {} end
+        local format_entries = {}
+        local known_formats = {}
+        for display_format, extension in pairs(formats) do
+            extension = tostring(extension):lower():gsub("^%.", "")
+            if extension == "wav" or extension == "mov" or extension == "mp4" then
+                table.insert(format_entries, {
+                    id = extension,
+                    extension = extension,
+                    display = tostring(display_format),
+                })
+                known_formats[extension] = true
+            end
+        end
+        -- Some Resolve builds omit usable containers from GetRenderFormats().
+        -- Probe the documented extension IDs anyway; Resolve's scripting API
+        -- expects IDs such as "mov", not Deliver-page labels such as "QuickTime".
+        local known_candidates = {
+            { id = "wav", extension = "wav", display = "Wave" },
+            { id = "mov", extension = "mov", display = "QuickTime" },
+            { id = "mp4", extension = "mp4", display = "MP4" },
+        }
+        for _, candidate in ipairs(known_candidates) do
+            if not known_formats[candidate.extension] then
+                table.insert(format_entries, candidate)
+            end
+        end
+        local order = { wav = 1, mov = 2, mp4 = 3 }
+        table.sort(format_entries, function(a, b)
+            return (order[a.extension] or 9) < (order[b.extension] or 9)
+        end)
+        local selected_format, selected_codec, selected_extension = nil, nil, nil
+        local tried_formats = {}
+        for _, entry in ipairs(format_entries) do
+            local render_format = entry.id
+            local ok_codecs, codecs = pcall(function()
+                return project:GetRenderCodecs(render_format)
+            end)
+            if not ok_codecs then codecs = {} end
+            local candidates = {}
+            for label, codec in pairs(codecs or {}) do
+                local code = tostring(codec)
+                if entry.extension == "wav" then
+                    if (tostring(label) .. " " .. code):lower():find("pcm", 1, true) and code ~= "" then
+                        table.insert(candidates, code)
+                    end
+                elseif code ~= "" then
+                    table.insert(candidates, code)
+                end
+            end
+            if #candidates == 0 and entry.extension == "wav" then
+                candidates = { "LinearPCM" }
+            elseif #candidates == 0 and entry.extension == "mov" then
+                candidates = { "H264", "ProRes422" }
+            elseif #candidates == 0 and entry.extension == "mp4" then
+                candidates = { "H264" }
+            end
+            table.sort(candidates, function(a, b)
+                local function priority(codec)
+                    codec = codec:lower()
+                    if codec == "h264" then return 0 end
+                    if codec:find("prores422", 1, true) then return 1 end
+                    return 2
+                end
+                return priority(a) < priority(b)
+            end)
+            for _, codec in ipairs(candidates) do
+                table.insert(tried_formats, entry.display .. " (" .. render_format .. ")/" .. codec)
+                local ok_format, accepted = pcall(function()
+                    return project:SetCurrentRenderFormatAndCodec(render_format, codec)
+                end)
+                if ok_format and accepted then
+                    selected_format = render_format
+                    selected_codec = codec
+                    selected_extension = entry.extension
+                    break
+                end
+            end
+            if selected_format then break end
+        end
+        if not selected_format then
+            error("Resolve could not select a WAV or audio-only MOV render format. Tried "
+                .. (#tried_formats > 0 and table.concat(tried_formats, ", ")
+                    or "WAV/LinearPCM and MOV codecs"))
+        end
+        local rendered_path = folder .. "/" .. prefix .. "." .. selected_extension
+        local settings = {
+            SelectAllFrames = false,
+            MarkIn = start_f,
+            MarkOut = end_f - 1,
+            TargetDir = folder,
+            CustomName = prefix,
+            ExportVideo = false,
+            ExportAudio = true,
+        }
+        -- H.264 QuickTime rejects LinearPCM / sample-rate fields. WAV can set them.
+        if selected_extension == "wav" then
+            settings.AudioCodec = "LinearPCM"
+            settings.AudioBitDepth = 16
+            settings.AudioSampleRate = 16000
+        elseif selected_extension == "mp4" then
+            settings.AudioCodec = "aac"
+            settings.AudioBitDepth = 16
+            settings.AudioSampleRate = 16000
+        end
+        if not project:SetRenderSettings(settings) then
+            error("Resolve rejected the selected clip audio render settings.")
+        end
+        job_id = project:AddRenderJob()
+        if not job_id then error("Resolve could not queue audio rendering for this clip.") end
+        if not project:StartRendering({ job_id }, false) then
+            error("Resolve could not start audio rendering for this clip.")
+        end
+        local duration = (end_f - start_f) / math.max(1, safe_number(clip.fps, 24))
+        local deadline = os.time() + math.max(300, duration * 10)
+        while os.time() < deadline do
+            local status = project:GetRenderJobStatus(job_id) or {}
+            local state = tostring(status.JobStatus or ""):lower()
+            if state == "complete" or state == "completed" then break end
+            if state == "failed" or state == "cancelled" or state == "canceled" then
+                error("Resolve failed to render selected clip audio.")
+            end
+            sleep(0.2)
+        end
+        if os.time() >= deadline then error("Resolve timed out while rendering clip audio.") end
+        if file_exists(rendered_path) then return rendered_path end
+        return nil
+    end)
+    if job_id then pcall(function() project:DeleteRenderJob(job_id) end) end
+    if previous_settings then pcall(function() project:SetRenderSettings(previous_settings) end) end
+    if previous_format and previous_codec then
+        pcall(function() project:SetCurrentRenderFormatAndCodec(previous_format, previous_codec) end)
+    end
+    if not ok then
+        error("Could not render selected clip audio in Resolve: " .. tostring(result))
+    end
+    if not result then error("Resolve finished rendering but did not create the WAV file.") end
+    return result
+end
+
 local function frame_to_timecode(frame, fps)
     local fps_i = math.max(1, math.floor(fps + 0.5))
     local ff = frame % fps_i
@@ -442,7 +619,7 @@ local function frame_to_timecode(frame, fps)
     return string.format("%02d:%02d:%02d:%02d", hh, mm, ss, ff)
 end
 
-local function list_clips()
+list_clips = function()
     local timeline = current_timeline()
     local fps = timeline_fps()
     clips_by_id = {}
@@ -506,9 +683,6 @@ local function clip_under_playhead()
         if clip.track_type == "video"
             and clip.timeline_start_frame == start_f
             and clip.source_start_frame == source_start then
-            if not clip.file_path or clip.file_path == "" then
-                error("Clip '" .. tostring(clip.name) .. "' has no media file path and cannot be transcribed.")
-            end
             return clip
         end
     end
@@ -523,9 +697,6 @@ local function clip_under_playhead()
     local file_path = ""
     if mp then
         file_path = mp:GetClipProperty("File Path") or ""
-    end
-    if file_path == "" then
-        error("Clip '" .. tostring(item:GetName()) .. "' has no media file path and cannot be transcribed.")
     end
     local clip_id = string.format("%s:%d:%d:%d", track_type, track_index, start_f, source_start)
     local clip = {
@@ -582,6 +753,47 @@ local function jump_to_clip_second(clip_id, second_in_clip)
     return true
 end
 
+local function jump_to_timeline_frame(frame)
+    resolve:OpenPage("edit")
+    local timeline = current_timeline()
+    timeline:SetCurrentTimecode(frame_to_timecode(
+        math.floor(safe_number(frame, 0)), timeline_fps()
+    ))
+    return true
+end
+
+local function find_textplus_tool(comp)
+    if not comp then
+        return nil
+    end
+    for _, name in ipairs({ "Text1", "TextPlus1", "TextPlus", "Text+", "Template" }) do
+        local tool = nil
+        pcall(function() tool = comp:FindTool(name) end)
+        if tool then
+            return tool
+        end
+    end
+    local ok, tools = pcall(function() return comp:GetToolList(false) end)
+    if not ok or type(tools) ~= "table" then
+        return nil
+    end
+    for _, tool in pairs(tools) do
+        local matched = false
+        pcall(function()
+            local attrs = tool:GetAttrs() or {}
+            local reg = tostring(attrs.TOOLS_RegID or "")
+            local name = tostring(attrs.TOOLS_Name or "")
+            if reg:find("Text", 1, true) or name:find("Text", 1, true) then
+                matched = true
+            end
+        end)
+        if matched then
+            return tool
+        end
+    end
+    return nil
+end
+
 local function set_textplus_property(item, tool, property_name, value, input_name, input_value)
     local ok, result = pcall(function()
         return item:SetProperty(property_name, value)
@@ -604,11 +816,13 @@ local function apply_caption_style(item, caption, settings)
     local comp = nil
     local tool = nil
     pcall(function()
-        comp = item:GetFusionCompByIndex(1)
-        if comp then
-            tool = comp:FindTool("Text1")
-                or comp:FindTool("TextPlus1")
-                or comp:FindTool("TextPlus")
+        local count = safe_number(item:GetFusionCompCount(), 1)
+        for index = 1, math.max(1, count) do
+            comp = item:GetFusionCompByIndex(index)
+            tool = find_textplus_tool(comp)
+            if tool then
+                break
+            end
         end
     end)
     local function rgb(hex)
@@ -710,10 +924,6 @@ local function create_captions(clip_id, captions, settings)
         error("There are no caption segments to create.")
     end
     local timeline = current_timeline()
-    if type(timeline.AddFusionTitleClip) ~= "function" then
-        error("This Resolve host does not expose Timeline.AddFusionTitleClip, which Captain needs to place Text+ titles at exact frame ranges.")
-    end
-
     local track_count = safe_number(timeline:GetTrackCount("video"), 0)
     local added_track = false
     if track_count < 1 then
@@ -747,12 +957,195 @@ local function create_captions(clip_id, captions, settings)
     end
 
     local inserted = {}
+    local template_seeds = {}
+    local place_mode = nil
+    local function item_span(item)
+        local start_at, end_at, track = -1, -1, -1
+        if not item then
+            return start_at, end_at, track
+        end
+        pcall(function() start_at = safe_number(item:GetStart(), -1) end)
+        pcall(function() end_at = safe_number(item:GetEnd(), -1) end)
+        pcall(function()
+            local info = item:GetTrackTypeAndIndex()
+            if type(info) == "table" then
+                track = safe_number(info[2], -1)
+            end
+        end)
+        return start_at, end_at, track
+    end
+    local function span_fits(got_start, got_end, start_f, end_f)
+        return math.abs(got_start - start_f) <= 1 and math.abs(got_end - end_f) <= 1
+    end
+    local function track_fits(got_track)
+        return got_track < 0 or got_track == track_index
+    end
+    local function go_to(frame)
+        local moved = false
+        pcall(function()
+            moved = timeline:SetCurrentTimecode(
+                frame_to_timecode(math.floor(frame), clip.fps)
+            )
+        end)
+        return moved and true or false
+    end
+    local function insert_textplus()
+        local ok_insert, item = pcall(function()
+            return timeline:InsertFusionTitleIntoTimeline("Text+")
+        end)
+        if ok_insert and item then
+            return item
+        end
+        return nil
+    end
+    local comp_path = nil
+    local carrier_mp = nil
+    local function first_item(result)
+        if type(result) == "table" then
+            return result[1]
+        end
+        if result and type(result) ~= "boolean" and type(result) ~= "string" and type(result) ~= "number" then
+            return result
+        end
+        return nil
+    end
+    local function prepare_carrier()
+        if carrier_mp and comp_path then
+            return
+        end
+        local tl_end = 0
+        pcall(function() tl_end = safe_number(timeline:GetEndFrame(), 0) end)
+        go_to(tl_end)
+        local seeded = insert_textplus()
+        if not seeded then
+            error("Resolve could not insert a Text+ title.")
+        end
+        local comp_count = 0
+        pcall(function() comp_count = safe_number(seeded:GetFusionCompCount(), 0) end)
+        mkdir_p(data_dir())
+        comp_path = data_dir() .. "/caption-textplus.comp"
+        local export_ok, exported = false, nil
+        if comp_count > 0 then
+            export_ok, exported = pcall(function()
+                return seeded:ExportFusionComp(comp_path, 1)
+            end)
+        end
+        pcall(function() timeline:DeleteClips({ seeded }, false) end)
+        local comp_file = file_exists(comp_path)
+        if not (export_ok and exported and comp_file) then
+            error("Resolve could not export the Text+ composition used for captions.")
+        end
+        local max_frames = 1
+        for _, caption in ipairs(captions) do
+            local span = safe_number(caption.end_frame, 0) - safe_number(caption.start_frame, 0)
+            if span > max_frames then
+                max_frames = span
+            end
+        end
+        local fps = math.max(1, math.floor(safe_number(clip.fps, 24) + 0.5))
+        local video_path = data_dir() .. "/caption-carrier.mov"
+        local ffmpeg_bin = "ffmpeg"
+        for _, candidate in ipairs({ "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg" }) do
+            local probe = io.popen(candidate .. " -version 2>&1", "r")
+            local header = probe and probe:read("*l") or nil
+            if probe then probe:close() end
+            if header and header:find("ffmpeg", 1, true) then
+                ffmpeg_bin = candidate
+                break
+            end
+        end
+        local quoted = "'" .. video_path:gsub("'", "'\\''") .. "'"
+        local cmd = string.format(
+            "%s -y -f lavfi -i color=c=black:s=16x16:r=%d:d=%.6f -pix_fmt yuv420p -c:v libx264 %s",
+            ffmpeg_bin:find("/", 1, true) and ("'" .. ffmpeg_bin .. "'") or ffmpeg_bin,
+            fps,
+            max_frames / fps,
+            quoted
+        )
+        os.execute(cmd)
+        local video_file = file_exists(video_path)
+        local media_pool = current_project():GetMediaPool()
+        local root = media_pool:GetRootFolder()
+        local captain_bin = nil
+        for _, folder in ipairs(root:GetSubFolderList() or {}) do
+            if folder:GetName() == "Captain" then
+                captain_bin = folder
+                break
+            end
+        end
+        if not captain_bin then
+            captain_bin = media_pool:AddSubFolder(root, "Captain")
+        end
+        if captain_bin then
+            media_pool:SetCurrentFolder(captain_bin)
+        end
+        local ok_import, imported = false, nil
+        if video_file then
+            ok_import, imported = pcall(function()
+                return media_pool:ImportMedia({ video_path })
+            end)
+            carrier_mp = ok_import and first_item(imported) or nil
+        end
+        if not carrier_mp then
+            error("Resolve could not import the caption carrier video.")
+        end
+    end
+    local function append_still(record_frame, source_frames)
+        local media_pool = current_project():GetMediaPool()
+        local ok_append, appended = pcall(function()
+            return media_pool:AppendToTimeline({ {
+                mediaPoolItem = carrier_mp,
+                startFrame = 0,
+                endFrame = source_frames,
+                trackIndex = track_index,
+                recordFrame = record_frame,
+                mediaType = 1,
+            } })
+        end)
+        if ok_append then
+            return first_item(appended)
+        end
+        return nil
+    end
+    local function place_caption_title(start_f, end_f)
+        local duration = end_f - start_f
+        if type(timeline.AddFusionTitleClip) == "function" then
+            return timeline:AddFusionTitleClip("Text+", track_index, start_f, duration)
+        end
+        prepare_carrier()
+        local placed = append_still(start_f, duration)
+        local got_start, got_end, got_track = item_span(placed)
+        local fits = placed ~= nil and span_fits(got_start, got_end, start_f, end_f) and track_fits(got_track)
+        local ok_comp, comp = false, nil
+        if fits then
+            ok_comp, comp = pcall(function()
+                return placed:ImportFusionComp(comp_path)
+            end)
+        end
+        if not fits then
+            if placed then
+                pcall(function() timeline:DeleteClips({ placed }, false) end)
+            end
+            error(
+                "Resolve placed the caption at "
+                .. tostring(got_start) .. "-" .. tostring(got_end)
+                .. " on track " .. tostring(got_track)
+                .. " instead of " .. tostring(start_f) .. "-" .. tostring(end_f)
+                .. " on track " .. tostring(track_index) .. "."
+            )
+        end
+        if not ok_comp or not comp then
+            pcall(function() timeline:DeleteClips({ placed }, false) end)
+            error("Resolve could not attach the Text+ composition to the caption.")
+        end
+        return placed
+    end
     local ok, count_or_error = pcall(function()
         for _, caption in ipairs(captions) do
             local start_f = safe_number(caption.start_frame, -1)
             local end_f = safe_number(caption.end_frame, -1)
             if end_f > start_f then
-                local item = timeline:AddFusionTitleClip("Text+", track_index, start_f, end_f - start_f)
+                local item = place_caption_title(start_f, end_f)
                 if not item then
                     error("Resolve could not create a caption at frame " .. tostring(start_f))
                 end
@@ -765,6 +1158,9 @@ local function create_captions(clip_id, captions, settings)
         end
         return #inserted
     end)
+    if #template_seeds > 0 then
+        pcall(function() timeline:DeleteClips(template_seeds, false) end)
+    end
     if not ok then
         if #inserted > 0 then
             pcall(function() timeline:DeleteClips(inserted, false) end)
@@ -1062,12 +1458,16 @@ local function dispatch(method, params)
         return timeline_info()
     elseif method == "capture_current_frame" then
         return capture_current_frame(params.image_path)
+    elseif method == "render_clip_audio" then
+        return render_clip_audio(params.clip_id, params.output_path)
     elseif method == "list_clips" then
         return list_clips()
     elseif method == "clip_under_playhead" then
         return clip_under_playhead()
     elseif method == "jump_to_clip_second" then
         return jump_to_clip_second(params.clip_id, safe_number(params.second_in_clip, 0))
+    elseif method == "jump_to_timeline_frame" then
+        return jump_to_timeline_frame(params.frame)
     elseif method == "import_timeline_xml" then
         return import_timeline_xml(params.xml_path)
     elseif method == "assemble_append" then

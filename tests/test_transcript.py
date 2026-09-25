@@ -7,6 +7,7 @@ from captain.transcript import (
     find_repeats,
     find_silence_gaps,
     gap_is_trimmed,
+    merge_timeline_transcripts,
     shrink_silence_cut,
     silence_period_count,
 )
@@ -27,6 +28,29 @@ def test_keep_all_is_single_range():
     assert len(ranges) == 1
     assert ranges[0][0] == 0.0
     assert ranges[0][1] == tr.duration
+
+
+def test_merge_timeline_transcripts_offsets_and_sorts_words_preserving_gaps():
+    first = Transcript(
+        [Word(0, "first", 0.2, 0.5, 0), Word(1, "clip", 0.6, 0.9, 0)],
+        duration=1.0,
+    )
+    second = Transcript(
+        [Word(0, "second", 0.1, 0.4, 0)],
+        duration=0.8,
+    )
+
+    merged = merge_timeline_transcripts(
+        [(second, 2.0), (first, 0.0)],
+        duration=3.0,
+        source_path="timeline:compound",
+    )
+
+    assert [word.text for word in merged.words] == ["first", "clip", "second"]
+    assert [word.start for word in merged.words] == pytest.approx([0.2, 0.6, 2.1])
+    assert [word.segment_id for word in merged.words] == [0, 0, 1]
+    assert merged.duration == 3.0
+    assert merged.source_path == "timeline:compound"
 
 
 def test_delete_middle_splits_range():

@@ -19,6 +19,8 @@ import logging
 import math
 import os
 import sys
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -298,6 +300,162 @@ class ResolveHandler:
                 except Exception:
                     log.warning("Could not remove temporary Resolve preview still", exc_info=True)
 
+    def render_clip_audio(self, clip: ClipInfo | str, output_path: str) -> str:
+        """Render the selected range to WAV or an audio-only MOV fallback."""
+        host_clip = self._lookup_clip(clip)
+        project = self._project()
+        start = int(host_clip.timeline_start_frame)
+        end = int(host_clip.timeline_end_frame)
+        if end <= start:
+            raise ResolveError("The selected timeline clip has no renderable duration.")
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        previous_settings = None
+        previous_format = None
+        job_id = None
+        try:
+            try:
+                previous_settings = project.GetRenderSettings()
+            except Exception:
+                pass
+            try:
+                previous_format = project.GetCurrentRenderFormatAndCodec()
+            except Exception:
+                pass
+            try:
+                formats = project.GetRenderFormats() or {}
+            except Exception:
+                formats = {}
+            format_entries = [
+                (str(extension).lower().lstrip("."), str(fmt))
+                for fmt, extension in formats.items()
+                if str(extension).lower().lstrip(".") in {"wav", "mov", "mp4"}
+            ]
+            # Some Resolve builds omit otherwise usable containers from this
+            # list. The API expects the extension ID ("mov"), so probe the
+            # documented IDs even when GetRenderFormats() leaves them out.
+            known_formats = {extension for extension, _display in format_entries}
+            for extension, display in (("wav", "Wave"), ("mov", "QuickTime"), ("mp4", "MP4")):
+                if extension not in known_formats:
+                    format_entries.append((extension, display))
+            format_entries.sort(key=lambda entry: {"wav": 0, "mov": 1, "mp4": 2}.get(entry[0], 9))
+            selected_format = None
+            selected_codec = None
+            selected_extension = None
+            attempted = []
+            for render_format, display_format in format_entries:
+                try:
+                    codecs = project.GetRenderCodecs(render_format) or {}
+                except Exception:
+                    codecs = {}
+                if render_format == "wav":
+                    codec_candidates = [
+                        str(codec)
+                        for label, codec in codecs.items()
+                        if "pcm" in f"{label} {codec}".lower()
+                    ] or ["LinearPCM"]
+                else:
+                    codec_candidates = [str(codec) for codec in codecs.values() if codec]
+                    codec_candidates.sort(
+                        key=lambda codec: (
+                            0 if codec.lower() == "h264" else
+                            1 if "prores422" in codec.lower() else 2
+                        )
+                    )
+                    if not codec_candidates:
+                        codec_candidates = ["H264", "ProRes422"] if render_format == "mov" else ["H264"]
+                for codec in dict.fromkeys(codec_candidates):
+                    attempted.append(f"{display_format} ({render_format})/{codec}")
+                    try:
+                        if project.SetCurrentRenderFormatAndCodec(render_format, codec):
+                            selected_format = render_format
+                            selected_codec = codec
+                            selected_extension = render_format
+                            break
+                    except Exception:
+                        continue
+                if selected_format:
+                    break
+            if not selected_format:
+                formats_text = ", ".join(f"{k} ({v})" for k, v in formats.items())
+                raise ResolveError(
+                    "Resolve could not select an audio render format. "
+                    f"Tried {', '.join(attempted) or 'WAV/LinearPCM and MOV codecs'}; "
+                    f"available formats: {formats_text or 'not reported by this Resolve version'}."
+                )
+            output_path = path.with_suffix(f".{selected_extension}")
+            settings = {
+                "SelectAllFrames": False,
+                "MarkIn": start,
+                "MarkOut": end - 1,
+                "TargetDir": str(path.parent),
+                "CustomName": path.stem,
+                "ExportVideo": False,
+                "ExportAudio": True,
+            }
+            # H.264 QuickTime rejects LinearPCM / sample-rate fields. WAV can set them.
+            if selected_extension == "wav":
+                settings["AudioCodec"] = "LinearPCM"
+                settings["AudioBitDepth"] = 16
+                settings["AudioSampleRate"] = 16000
+            elif selected_extension == "mp4":
+                settings["AudioCodec"] = "aac"
+                settings["AudioBitDepth"] = 16
+                settings["AudioSampleRate"] = 16000
+            if not project.SetRenderSettings(settings):
+                raise ResolveError("Resolve rejected the selected clip audio render settings.")
+            job_id = project.AddRenderJob()
+            if not job_id:
+                raise ResolveError("Resolve could not queue audio rendering for this clip.")
+            if not project.StartRendering([job_id], False):
+                raise ResolveError("Resolve could not start audio rendering for this clip.")
+            deadline = time.monotonic() + max(300.0, host_clip.duration_sec * 10.0)
+            while time.monotonic() < deadline:
+                status = project.GetRenderJobStatus(job_id) or {}
+                state = str(status.get("JobStatus", "")).lower()
+                if state in {"complete", "completed"}:
+                    break
+                if state in {"failed", "cancelled", "canceled"}:
+                    raise ResolveError(
+                        f"Resolve could not render clip audio ({status.get('JobStatus')})."
+                    )
+                time.sleep(0.25)
+            else:
+                raise ResolveError("Resolve timed out while rendering clip audio.")
+            if output_path.is_file():
+                return str(output_path)
+            candidates = sorted(path.parent.glob(f"{path.stem}*.{selected_extension}"))
+            if candidates:
+                return str(candidates[0])
+            raise ResolveError(
+                f"Resolve finished rendering but did not create the {selected_extension.upper()} file."
+            )
+        except ResolveError:
+            raise
+        except Exception as e:
+            raise ResolveError(f"Could not render selected clip audio in Resolve: {e}") from e
+        finally:
+            if job_id:
+                try:
+                    project.DeleteRenderJob(job_id)
+                except Exception:
+                    log.warning("Could not remove temporary Resolve render job", exc_info=True)
+            if previous_settings:
+                try:
+                    project.SetRenderSettings(previous_settings)
+                except Exception:
+                    log.warning("Could not restore Resolve render settings", exc_info=True)
+            if previous_format:
+                try:
+                    if isinstance(previous_format, dict):
+                        project.SetCurrentRenderFormatAndCodec(
+                            previous_format.get("format"), previous_format.get("codec")
+                        )
+                    else:
+                        project.SetCurrentRenderFormatAndCodec(*previous_format)
+                except Exception:
+                    log.warning("Could not restore Resolve render format", exc_info=True)
+
     @staticmethod
     def _textplus_tool(item: Any) -> Any:
         try:
@@ -481,10 +639,7 @@ class ResolveHandler:
             project_width, project_height = 1920, 1080
         add_title = getattr(timeline, "AddFusionTitleClip", None)
         if not callable(add_title):
-            raise ResolveError(
-                "This Resolve host does not expose Timeline.AddFusionTitleClip, which Captain "
-                "needs to place Text+ titles at exact frame ranges."
-            )
+            add_title = None
 
         track_count = int(timeline.GetTrackCount("video") or 0)
         added_track = False
@@ -516,13 +671,102 @@ class ResolveHandler:
             added_track = True
 
         items: list[Any] = []
+        template_seeds: list[Any] = []
+        carrier_mp: Any = None
+        comp_path: str | None = None
+
+        def prepare_caption_carrier() -> None:
+            nonlocal carrier_mp, comp_path
+            if carrier_mp is not None and comp_path:
+                return
+            seeded = None
+            for name in ("Text+", "Titles/Text+"):
+                try:
+                    seeded = timeline.InsertFusionTitleIntoTimeline(name)
+                except Exception:
+                    seeded = None
+                if seeded:
+                    break
+            if not seeded:
+                raise ResolveError("Resolve could not insert a Text+ title.")
+            template_seeds.append(seeded)
+            comp_dir = Path(tempfile.mkdtemp(prefix="captain_caption_"))
+            comp_file = comp_dir / "caption-textplus.comp"
+            try:
+                exported = bool(seeded.ExportFusionComp(str(comp_file), 1))
+            except Exception as e:
+                raise ResolveError(f"Resolve could not export the Text+ composition: {e}") from e
+            if not exported or not comp_file.is_file():
+                raise ResolveError("Resolve could not export the Text+ composition used for captions.")
+            png_path = comp_dir / "caption-carrier.png"
+            png_path.write_bytes(bytes.fromhex(
+                "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+                "0000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082"
+            ))
+            media_pool = self._project().GetMediaPool()
+            try:
+                imported = media_pool.ImportMedia([str(png_path)])
+            except Exception as e:
+                raise ResolveError(f"Resolve could not import the caption carrier image: {e}") from e
+            carrier = imported[0] if isinstance(imported, list) and imported else imported
+            if not carrier:
+                raise ResolveError("Resolve could not import the caption carrier image.")
+            carrier_mp = carrier
+            comp_path = str(comp_file)
+
+        def place_caption_title(start: int, end: int) -> Any:
+            duration = end - start
+            if add_title is not None:
+                return add_title("Text+", track_index, start, duration)
+            prepare_caption_carrier()
+            media_pool = self._project().GetMediaPool()
+            appended = media_pool.AppendToTimeline([{
+                "mediaPoolItem": carrier_mp,
+                "startFrame": 0,
+                "endFrame": duration,
+                "trackIndex": track_index,
+                "recordFrame": start,
+                "mediaType": 1,
+            }])
+            placed = appended[0] if isinstance(appended, list) and appended else appended or None
+            if placed is None or placed is False:
+                raise ResolveError(f"Resolve could not place a caption at frame {start}.")
+            got_start = int(placed.GetStart())
+            got_end = int(placed.GetEnd())
+            if abs(got_start - start) > 1 or abs((got_end - got_start) - duration) > 1:
+                try:
+                    timeline.DeleteClips([placed], False)
+                except Exception:
+                    log.warning("Could not remove a misplaced caption", exc_info=True)
+                raise ResolveError(
+                    f"Resolve placed the caption at {got_start}-{got_end} "
+                    f"instead of {start}-{end}."
+                )
+            try:
+                comp = placed.ImportFusionComp(comp_path)
+            except Exception as e:
+                try:
+                    timeline.DeleteClips([placed], False)
+                except Exception:
+                    log.warning("Could not remove a caption with no Text+ comp", exc_info=True)
+                raise ResolveError(
+                    f"Resolve could not attach the Text+ composition to the caption: {e}"
+                ) from e
+            if not comp:
+                try:
+                    timeline.DeleteClips([placed], False)
+                except Exception:
+                    log.warning("Could not remove a caption with no Text+ comp", exc_info=True)
+                raise ResolveError("Resolve could not attach the Text+ composition to the caption.")
+            return placed
+
         try:
             for caption in captions:
                 start = int(caption["start_frame"])
                 end = int(caption["end_frame"])
                 if end <= start:
                     continue
-                title = add_title("Text+", track_index, start, end - start)
+                title = place_caption_title(start, end)
                 if title is None:
                     raise ResolveError(
                         f"Resolve could not create the caption at frame {start}."
@@ -553,6 +797,12 @@ class ResolveHandler:
             if isinstance(e, ResolveError):
                 raise
             raise ResolveError(f"Caption generation failed: {e}") from e
+        finally:
+            if template_seeds:
+                try:
+                    timeline.DeleteClips(template_seeds, False)
+                except Exception:
+                    log.warning("Could not remove temporary Text+ template clip", exc_info=True)
 
     @staticmethod
     def _hex_rgb(value: Any) -> tuple[float, float, float]:
@@ -614,10 +864,6 @@ class ResolveHandler:
                 and clip.timeline_start_frame == start
                 and clip.source_start_frame == source_start
             ):
-                if not clip.file_path:
-                    raise ResolveError(
-                        f"Clip '{clip.name}' has no media file path and cannot be transcribed."
-                    )
                 return clip
         # Fallback: build ClipInfo from the TimelineItem directly.
         track_type, track_index = "video", 1
@@ -632,10 +878,6 @@ class ResolveHandler:
         file_path = ""
         if mp_item is not None:
             file_path = mp_item.GetClipProperty("File Path") or ""
-        if not file_path:
-            raise ResolveError(
-                f"Clip '{item.GetName()}' has no media file path and cannot be transcribed."
-            )
         clip_id = _make_clip_id(track_type, track_index, start, source_start)
         clip = ClipInfo(
             clip_id=clip_id,
@@ -669,6 +911,12 @@ class ResolveHandler:
         frame = clip.timeline_start_frame + max(0, offset)
         frame = max(clip.timeline_start_frame, min(frame, clip.timeline_end_frame - 1))
         timeline.SetCurrentTimecode(frame_to_timecode(frame, clip.fps))
+
+    def jump_to_timeline_frame(self, frame: int) -> None:
+        """Move the playhead to an absolute frame in the current timeline."""
+        self.resolve.OpenPage("edit")
+        timeline = self._timeline()
+        timeline.SetCurrentTimecode(frame_to_timecode(int(frame), self.timeline_fps()))
 
     # ---- assemble -------------------------------------------------------
 
@@ -919,12 +1167,17 @@ class ResolveHandler:
             return self.timeline_info()
         if method == "capture_current_frame":
             return self.capture_current_frame(params["image_path"])
+        if method == "render_clip_audio":
+            return self.render_clip_audio(params["clip_id"], params["output_path"])
         if method == "list_clips":
             return [c.to_dict() for c in self.list_clips()]
         if method == "clip_under_playhead":
             return self.clip_under_playhead().to_dict()
         if method == "jump_to_clip_second":
             self.jump_to_clip_second(params["clip_id"], float(params["second_in_clip"]))
+            return True
+        if method == "jump_to_timeline_frame":
+            self.jump_to_timeline_frame(int(params["frame"]))
             return True
         if method == "import_timeline_xml":
             return bool(self.import_timeline_xml(params["xml_path"]))
@@ -994,6 +1247,15 @@ class BridgedResolveHandler:
         result = self._client.call("capture_current_frame", {"image_path": image_path})
         return str(result) if result else None
 
+    def render_clip_audio(self, clip: ClipInfo | str, output_path: str) -> str:
+        clip_id = clip if isinstance(clip, str) else clip.clip_id
+        duration = 0.0 if isinstance(clip, str) else clip.duration_sec
+        return str(self._client.call(
+            "render_clip_audio",
+            {"clip_id": clip_id, "output_path": output_path},
+            timeout=max(360.0, duration * 10.0 + 60.0),
+        ))
+
     def list_clips(self) -> list[ClipInfo]:
         return [ClipInfo.from_dict(d) for d in self._client.call("list_clips")]
 
@@ -1006,6 +1268,9 @@ class BridgedResolveHandler:
             "jump_to_clip_second",
             {"clip_id": clip_id, "second_in_clip": second_in_clip},
         )
+
+    def jump_to_timeline_frame(self, frame: int) -> None:
+        self._client.call("jump_to_timeline_frame", {"frame": int(frame)})
 
     def import_timeline_xml(self, xml_path: str) -> bool:
         return bool(self._client.call("import_timeline_xml", {"xml_path": xml_path}))
