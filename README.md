@@ -4,8 +4,9 @@
 
 Captain turns a clip into a word-level transcript, lets you delete, reorder, and
 auto-trim like you’re editing text, then applies those cuts back into DaVinci
-Resolve — replace in place, ripple, or a new timeline. Transcription runs
-locally with Whisper. Works on **Resolve Free and Studio**.
+Resolve — replace in place, ripple, or a new timeline. Create styled Text+ captions
+from the transcript, with editable breaks, word-by-word mode, and optional write-on
+animation. Transcription runs locally with Whisper. Works on **Resolve Free and Studio**.
 
 <img width="1800" height="1093" alt="Screenshot 2026-07-18 at 8 50 33 AM" src="https://github.com/user-attachments/assets/737f202e-ee13-4982-839d-5ebb9ad557f9" />
 
@@ -52,6 +53,12 @@ cut-paste · Cmd+Z / Cmd+Shift+Z undo/redo · click jumps the playhead ·
 **Trim Silence** / **Remove Repeats** for auto-trims · silence markers (`…`)
 show long gaps; struck = will be trimmed.
 
+**Captions:** Select a video clip or place the playhead over one, then click
+**Create Captions**. Press Return in the transcript to add a caption break before
+the selected or focused word; Backspace merges breaks, and undo/redo is supported.
+Style and preview Text+ titles, with auto-fit, word-by-word, hold-through-silence,
+and optional write-on. Best results come from a single compound clip.
+
 **Script colors:** white = match · blue = in script only · magenta = in video
 only · red = mismatch · gray strikethrough = removed.
 
@@ -71,15 +78,16 @@ Workspace → Scripts → Captain.lua   (Resolve Lua, live resolve handle)
 | **Captain.lua** | Resolve Scripts entry; owns the live `resolve` API and the bridge loop |
 | **Bridge** | File-based JSON-RPC between Lua and the Python UI |
 | **faster-whisper** | Offline transcription with word-level timestamps |
-| **Transcript model** | Ordered words, removed set, silence cuts; `keep_ranges()` drives assembly |
-| **GUI** | PySide6 transcript editor: lines, silence markers, search, script compare |
-| **Assemble** | Maps keep ranges to Resolve timeline ops (replace / ripple / new timeline) |
+| **Transcript model** | Ordered words, removed set, silence cuts, saved caption breaks; `keep_ranges()` drives assembly |
+| **GUI** | PySide6 transcript editor: lines, silence markers, caption breaks, search, script compare, Text+ caption preview/settings |
+| **Assemble / captions** | Maps keep ranges to Resolve timeline ops; creates frame-ranged Text+ titles on an available video track |
 
 Apply modes: **replace in place** (default, non-ripple), **replace with ripple**,
 or **new timeline** (`{clip} [Captain] {n}`).
 
 Config lives at `~/Library/Application Support/Captain/config.json`
-(Whisper model/device, language, silence thresholds, repeat n-gram size).
+(Whisper model/device, language, silence thresholds, repeat n-gram size, and
+last-used caption settings).
 
 ## Development
 
