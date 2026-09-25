@@ -359,6 +359,80 @@ local function timeline_fps()
     return fps
 end
 
+local function timeline_info()
+    local timeline = current_timeline()
+    local project = current_project()
+    local fps = timeline_fps()
+    local width = safe_number(timeline:GetSetting("timelineResolutionWidth"), nil)
+    local height = safe_number(timeline:GetSetting("timelineResolutionHeight"), nil)
+    if not width then
+        width = safe_number(project:GetSetting("timelineResolutionWidth"), 1920)
+    end
+    if not height then
+        height = safe_number(project:GetSetting("timelineResolutionHeight"), 1080)
+    end
+    local tc = ""
+    local ok_tc, value = pcall(function() return timeline:GetCurrentTimecode() end)
+    if ok_tc and value then
+        tc = tostring(value)
+    end
+    local hh, mm, ss, ff = tc:match("^(%d+):(%d+):(%d+):(%d+)$")
+    local playhead = 0
+    if hh then
+        playhead = ((tonumber(hh) * 3600 + tonumber(mm) * 60 + tonumber(ss))
+            * math.floor(fps + 0.5)) + tonumber(ff)
+    end
+    return {
+        fps = fps,
+        width = width,
+        height = height,
+        playhead_timecode = tc,
+        playhead_frame = playhead,
+    }
+end
+
+local function capture_current_frame(image_path)
+    local timeline = current_timeline()
+    local still = nil
+    local album = nil
+    local ok, result = pcall(function()
+        local gallery = resolve:GetGallery()
+        album = gallery and gallery:GetCurrentStillAlbum() or nil
+        still = timeline:GrabStill()
+        if not still or not album then
+            return false
+        end
+        local folder = image_path:match("^(.*)/[^/]+$") or "."
+        local prefix = image_path:match("([^/]+)%.png$") or "captain-preview"
+        mkdir_p(folder)
+        return album:ExportStills({ still }, folder, prefix, "png")
+    end)
+    if still and album then
+        pcall(function() album:DeleteStills({ still }) end)
+    end
+    if not ok or not result then
+        return nil
+    end
+    if file_exists(image_path) then
+        return image_path
+    end
+    local function shell_quote(value)
+        return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+    end
+    local folder = image_path:match("^(.*)/[^/]+$") or "."
+    local prefix = image_path:match("([^/]+)%.png$") or "captain-preview"
+    local command = "find " .. shell_quote(folder)
+        .. " -maxdepth 1 -type f -name " .. shell_quote(prefix .. "_*.png")
+        .. " -print -quit"
+    local pipe = io.popen(command, "r")
+    if not pipe then
+        return nil
+    end
+    local exported_path = pipe:read("*l")
+    pipe:close()
+    return exported_path
+end
+
 local function frame_to_timecode(frame, fps)
     local fps_i = math.max(1, math.floor(fps + 0.5))
     local ff = frame % fps_i
@@ -506,6 +580,205 @@ local function jump_to_clip_second(clip_id, second_in_clip)
     end
     timeline:SetCurrentTimecode(frame_to_timecode(frame, clip.fps))
     return true
+end
+
+local function set_textplus_property(item, tool, property_name, value, input_name, input_value)
+    local ok, result = pcall(function()
+        return item:SetProperty(property_name, value)
+    end)
+    if ok and result then
+        return true
+    end
+    if tool then
+        local set_ok = pcall(function()
+            tool[input_name or property_name] = input_value == nil and value or input_value
+        end)
+        if set_ok then
+            return true
+        end
+    end
+    return false
+end
+
+local function apply_caption_style(item, caption, settings)
+    local comp = nil
+    local tool = nil
+    pcall(function()
+        comp = item:GetFusionCompByIndex(1)
+        if comp then
+            tool = comp:FindTool("Text1")
+                or comp:FindTool("TextPlus1")
+                or comp:FindTool("TextPlus")
+        end
+    end)
+    local function rgb(hex)
+        local value = tostring(hex or "#FFFFFF"):gsub("#", "")
+        if #value ~= 6 then
+            return 1, 1, 1
+        end
+        return tonumber(value:sub(1, 2), 16) / 255,
+            tonumber(value:sub(3, 4), 16) / 255,
+            tonumber(value:sub(5, 6), 16) / 255
+    end
+    local tr, tg, tb = rgb(settings.text_color)
+    local or_, og, ob = rgb(settings.outline_color)
+    local sr, sg, sb = rgb(settings.shadow_color)
+    local timeline = current_timeline()
+    local width = safe_number(timeline:GetSetting("timelineResolutionWidth"), 1920)
+    local height = safe_number(timeline:GetSetting("timelineResolutionHeight"), 1080)
+    local font_size = tonumber(settings.font_size) or 96
+    local vertical = tostring(settings.vertical_alignment or "center")
+    vertical = vertical:sub(1, 1):upper() .. vertical:sub(2)
+    local alignment = tostring(settings.alignment or "center")
+    alignment = alignment:sub(1, 1):upper() .. alignment:sub(2)
+    local alignment_input = ({ Left = 0, Center = 1, Right = 2 })[alignment] or 1
+    local vertical_input = ({ Top = 0, Center = 1, Bottom = 2 })[vertical] or 1
+    local layout_type = tostring(settings.layout_type or "Frame")
+    local layout_input = layout_type == "Point" and 0 or 1
+    local values = {
+        { "StyledText", caption.text, "StyledText" },
+        { "Font", settings.font_family or "Arial", "Font" },
+        { "Style", settings.font_style or "Regular", "Style" },
+        { "FontSize", font_size / math.max(1, height), "Size" },
+        { "Tracking", tonumber(settings.tracking) or 1.0, "Tracking" },
+        { "LineSpacing", tonumber(settings.line_spacing) or 1.0, "LineSpacing" },
+        { "HorizontalJustification", alignment, "HorizontalJustification", alignment_input },
+        { "PositionX", tonumber(settings.position_x) or 0.5, "Center" },
+        { "PositionY", tonumber(settings.position_y) or 0.85, "Center" },
+        { "AnchorPointX", ((tonumber(settings.anchor_x) or 0.5) - 0.5) * width, "AnchorPointX" },
+        { "AnchorPointY", (0.5 - (tonumber(settings.anchor_y) or 0.5)) * height, "AnchorPointY" },
+        { "ZoomX", tonumber(settings.scale_x) or 1.0, "ZoomX" },
+        { "ZoomY", tonumber(settings.scale_y) or 1.0, "ZoomY" },
+        { "RotationAngle", tonumber(settings.rotation) or 0, "Angle" },
+        { "LayoutType", layout_type, "LayoutType", layout_input },
+        { "Width", tonumber(settings.layout_width) or 1.0, "Width" },
+        { "Height", tonumber(settings.layout_height) or 1.0, "Height" },
+        { "VerticalJustification", vertical, "VerticalJustification", vertical_input },
+        { "ColorRed", tr, "Red1" }, { "ColorGreen", tg, "Green1" },
+        { "ColorBlue", tb, "Blue1" }, { "ColorAlpha", 1.0, "Alpha1" },
+        { "OutlineEnabled", settings.outline_enabled and 1 or 0, "Enabled2" },
+        { "OutlineRed", or_, "Red2" }, { "OutlineGreen", og, "Green2" },
+        { "OutlineBlue", ob, "Blue2" },
+        { "OutlineWidth", tonumber(settings.outline_width) or 2, "Thickness2",
+            (tonumber(settings.outline_width) or 2) / math.max(1, font_size) },
+        { "OutlineAlpha", tonumber(settings.outline_opacity) or 1.0, "Alpha2" },
+        { "ShadowEnabled", settings.shadow_enabled and 1 or 0, "Enabled3" },
+        { "ShadowRed", sr, "Red3" }, { "ShadowGreen", sg, "Green3" },
+        { "ShadowBlue", sb, "Blue3" },
+        { "ShadowOpacity", tonumber(settings.shadow_opacity) or 0.65, "Alpha3" },
+        { "Opacity", (tonumber(settings.image_opacity) or 1.0) * 100, "Opacity" },
+    }
+    local required = {
+        StyledText = true, Font = true, FontSize = true,
+        PositionX = true, PositionY = true,
+        ColorRed = true, ColorGreen = true, ColorBlue = true, ColorAlpha = true,
+    }
+    for _, entry in ipairs(values) do
+        local applied = set_textplus_property(item, tool, entry[1], entry[2], entry[3], entry[4])
+        if not applied and required[entry[1]] then
+            error("Resolve could not apply Text+ setting '" .. entry[1] .. "' to a caption.")
+        end
+    end
+    if settings.write_on and (not tool or not comp) then
+        error("Resolve did not expose the Text+ controls needed for write-on.")
+    end
+    if settings.write_on and tool and comp then
+        local duration = math.max(0, safe_number(caption.write_on_end_frame, caption.start_frame)
+            - safe_number(caption.start_frame, 0))
+        local ok = pcall(function()
+            local spline = comp:BezierSpline()
+            spline[0] = 0.0
+            spline[duration] = 1.0
+            tool.WriteOnEnd = spline
+        end)
+        if not ok then
+            error("Could not animate the Text+ write-on control.")
+        end
+    end
+end
+
+local function create_captions(clip_id, captions, settings)
+    local clip = clips_by_id[clip_id]
+    if not clip then
+        list_clips()
+        clip = clips_by_id[clip_id]
+    end
+    if not clip or clip.track_type ~= "video" then
+        error("Choose a video clip before creating captions.")
+    end
+    if not captions or #captions == 0 then
+        error("There are no caption segments to create.")
+    end
+    local timeline = current_timeline()
+    if type(timeline.AddFusionTitleClip) ~= "function" then
+        error("This Resolve host does not expose Timeline.AddFusionTitleClip, which Captain needs to place Text+ titles at exact frame ranges.")
+    end
+
+    local track_count = safe_number(timeline:GetTrackCount("video"), 0)
+    local added_track = false
+    if track_count < 1 then
+        if not timeline:AddTrack("video") then
+            error("Could not create a video track for captions.")
+        end
+        track_count = safe_number(timeline:GetTrackCount("video"), 1)
+        added_track = true
+    end
+    local track_index = track_count
+    local overlaps = false
+    local existing = timeline:GetItemListInTrack("video", track_index) or {}
+    for _, item in ipairs(existing) do
+        local item_start = safe_number(item:GetStart(), -1)
+        local item_end = safe_number(item:GetEnd(), -1)
+        for _, caption in ipairs(captions) do
+            if safe_number(caption.start_frame, 0) < item_end
+                and item_start < safe_number(caption.end_frame, 0) then
+                overlaps = true
+                break
+            end
+        end
+        if overlaps then break end
+    end
+    if overlaps then
+        if not timeline:AddTrack("video") then
+            error("The top video track is occupied and Resolve could not add a new one.")
+        end
+        track_index = safe_number(timeline:GetTrackCount("video"), track_count + 1)
+        added_track = true
+    end
+
+    local inserted = {}
+    local ok, count_or_error = pcall(function()
+        for _, caption in ipairs(captions) do
+            local start_f = safe_number(caption.start_frame, -1)
+            local end_f = safe_number(caption.end_frame, -1)
+            if end_f > start_f then
+                local item = timeline:AddFusionTitleClip("Text+", track_index, start_f, end_f - start_f)
+                if not item then
+                    error("Resolve could not create a caption at frame " .. tostring(start_f))
+                end
+                inserted[#inserted + 1] = item
+                apply_caption_style(item, caption, settings or {})
+            end
+        end
+        if #inserted == 0 then
+            error("Resolve did not create any caption titles.")
+        end
+        return #inserted
+    end)
+    if not ok then
+        if #inserted > 0 then
+            pcall(function() timeline:DeleteClips(inserted, false) end)
+        end
+        if added_track then
+            local remaining = timeline:GetItemListInTrack("video", track_index) or {}
+            if #remaining == 0 then
+                pcall(function() timeline:DeleteTrack("video", track_index) end)
+            end
+        end
+        error(count_or_error)
+    end
+    clips_by_id = {}
+    return count_or_error
 end
 
 local function import_timeline_xml(xml_path)
@@ -785,6 +1058,10 @@ local function dispatch(method, params)
         return list_timeline_names()
     elseif method == "timeline_fps" then
         return timeline_fps()
+    elseif method == "timeline_info" then
+        return timeline_info()
+    elseif method == "capture_current_frame" then
+        return capture_current_frame(params.image_path)
     elseif method == "list_clips" then
         return list_clips()
     elseif method == "clip_under_playhead" then
@@ -801,6 +1078,8 @@ local function dispatch(method, params)
             params.keep_ranges_frames,
             params.ripple
         )
+    elseif method == "create_captions" then
+        return create_captions(params.clip_id, params.captions, params.settings)
     else
         error("Unknown bridge method: " .. tostring(method))
     end

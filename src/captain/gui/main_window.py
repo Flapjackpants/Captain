@@ -11,7 +11,7 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from .. import config
 from ..api import ClipInfo, ResolveError, create_resolve_handler
 from ..assemble import build_fcp7_xml, next_captain_timeline_name, seconds_to_source_frames
+from ..captions import build_caption_segments, normalize_caption_settings
 from ..compare import (
     AlignmentResult,
     align_transcript,
@@ -45,6 +46,7 @@ from ..compare import (
 from ..engine import Transcriber, extract_audio
 from ..transcript import Transcript, SILENCE_DISPLAY_MIN, find_repeats, find_silence_gaps
 from .script_view import ScriptView
+from .caption_dialog import CaptionSettingsDialog
 from .settings_dialog import SettingsDialog
 from .transcript_view import TranscriptView
 
@@ -246,6 +248,8 @@ class MainWindow(QMainWindow):
 
         hint = QLabel(
             "Select words, then: Delete toggles remove/restore • "
+            "Return adds a caption break before selection/current word • "
+            "Backspace merges a manual break when no words are selected • "
             "Cmd/Ctrl+X cuts • Cmd/Ctrl+V pastes • Cmd/Ctrl+Z undo • "
             "Cmd/Ctrl+Shift+Z redo • "
             "click a word/timecode/silence jumps the playhead • "
@@ -264,8 +268,11 @@ class MainWindow(QMainWindow):
         self.trim_silence_btn.clicked.connect(self._trim_silence)
         self.trim_repeats_btn = QPushButton("Remove Repeats")
         self.trim_repeats_btn.clicked.connect(self._trim_repeats)
+        self.create_captions_btn = QPushButton("Create Captions")
+        self.create_captions_btn.clicked.connect(self._create_captions)
         bottom.addWidget(self.trim_silence_btn)
         bottom.addWidget(self.trim_repeats_btn)
+        bottom.addWidget(self.create_captions_btn)
         bottom.addStretch(1)
 
         self.apply_btn = QToolButton()
@@ -327,6 +334,7 @@ class MainWindow(QMainWindow):
         for widget in (
             self.trim_silence_btn,
             self.trim_repeats_btn,
+            self.create_captions_btn,
             self.apply_btn,
             self.search_edit,
             self.search_prev_btn,
@@ -710,6 +718,102 @@ class MainWindow(QMainWindow):
         self._status(
             f"{len(transcript.words)} words • {transcript.duration:.1f}s • "
             "edit, then Apply"
+        )
+
+    def _create_captions(self) -> None:
+        transcript = self.view.transcript
+        clip = self.current_clip
+        if transcript is None or clip is None:
+            QMessageBox.information(
+                self,
+                "Create Captions",
+                "Load a transcript and select its video clip first.",
+            )
+            return
+        if clip.track_type != "video":
+            QMessageBox.warning(
+                self, "Create Captions", "Captions can only be added above a video clip."
+            )
+            return
+
+        saved = normalize_caption_settings(self.cfg.get("caption_settings"))
+        preview_texts = [
+            " ".join(
+                transcript.words[i].text.strip()
+                for i in line.word_indices
+                if i not in transcript.removed
+            ).strip()
+            for line in transcript.lines()
+        ]
+        preview_texts = [text for text in preview_texts if text]
+        word_texts = [
+            transcript.words[i].text.strip()
+            for i in transcript.order
+            if i not in transcript.removed
+        ]
+
+        timeline_info: dict = {"width": 1920, "height": 1080}
+        preview = QPixmap()
+        try:
+            timeline_info = self.resolve.timeline_info()
+            with tempfile.TemporaryDirectory(prefix="captain_caption_preview_") as tmp:
+                image_path = str(Path(tmp) / "timeline-frame.png")
+                captured_path = self.resolve.capture_current_frame(image_path)
+                if captured_path:
+                    preview_path = (
+                        captured_path if isinstance(captured_path, str) else image_path
+                    )
+                    preview = QPixmap(preview_path)
+        except Exception as e:
+            log.warning("Could not capture Resolve preview frame: %s", e)
+
+        dlg = CaptionSettingsDialog(
+            int(timeline_info.get("width", 1920)),
+            int(timeline_info.get("height", 1080)),
+            preview,
+            preview_texts,
+            word_texts,
+            saved,
+            self,
+        )
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+
+        settings = dlg.values()
+        captions = build_caption_segments(
+            transcript,
+            clip,
+            word_by_word=bool(settings["word_by_word"]),
+            hold_to_next=bool(settings["hold_to_next"]),
+        )
+        if not captions:
+            QMessageBox.information(
+                self,
+                "Create Captions",
+                "There are no kept words to turn into captions.",
+            )
+            return
+        self.cfg["caption_settings"] = settings
+        config.save_config(self.cfg)
+        try:
+            count = self.resolve.create_captions(
+                clip,
+                [segment.to_dict() for segment in captions],
+                settings,
+            )
+        except ResolveError as e:
+            QMessageBox.critical(self, "Create Captions", str(e))
+            return
+        except Exception as e:
+            log.exception("Caption generation failed")
+            QMessageBox.critical(self, "Create Captions", f"Caption generation failed:\n{e}")
+            return
+
+        self._status(f"Created {count} Text+ caption clips on the timeline")
+        QMessageBox.information(
+            self,
+            "Create Captions",
+            f"Created {count} Text+ caption clips above '{clip.name}'.",
         )
 
     def _save_session(self, transcript: Transcript) -> None:

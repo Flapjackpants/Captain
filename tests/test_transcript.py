@@ -407,6 +407,39 @@ def test_lines_by_segment_id():
     assert lines[1].start == 1.2
 
 
+def test_manual_caption_break_splits_existing_whisper_line():
+    words = [
+        Word(index=0, text="hello", start=0.0, end=0.2, segment_id=1),
+        Word(index=1, text="there", start=0.2, end=0.4, segment_id=1),
+        Word(index=2, text="friend", start=0.4, end=0.7, segment_id=1),
+    ]
+    tr = Transcript(words=words, duration=1.0)
+
+    assert tr.add_caption_break(2)
+    assert [line.word_indices for line in tr.lines()] == [(0, 1), (2,)]
+    assert not tr.add_caption_break(2)
+    assert tr.remove_caption_break(2)
+    assert [line.word_indices for line in tr.lines()] == [(0, 1, 2)]
+
+
+def test_caption_breaks_roundtrip_clean_and_undo_snapshot():
+    from captain.transcript import apply_snapshot, snapshot_transcript
+
+    tr = make_transcript(["a", "b", "c"])
+    assert tr.add_caption_break(1)
+    saved = Transcript.from_json(tr.to_json())
+    assert saved.caption_breaks == {1}
+    legacy = Transcript.from_json('{"words": [], "duration": 0}')
+    assert legacy.caption_breaks == set()
+
+    clean = Transcript.from_json(tr.to_json(clean=True))
+    assert clean.caption_breaks == set()
+    snapshot = snapshot_transcript(tr)
+    tr.remove_caption_break(1)
+    apply_snapshot(tr, snapshot)
+    assert tr.caption_breaks == {1}
+
+
 def test_lines_by_pause_when_no_segments():
     # All segment_id=0 and large gap → two lines via pause grouping
     words = [
@@ -484,4 +517,3 @@ def test_transcript_typography_defaults():
         "transcript_word_pad_y",
     ):
         assert key in cfg
-

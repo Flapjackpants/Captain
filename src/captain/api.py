@@ -20,6 +20,7 @@ import math
 import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .transcript import frame_to_timecode
@@ -235,6 +236,331 @@ class ResolveHandler:
             return float(fps)
         except (TypeError, ValueError):
             return float(self._project().GetSetting("timelineFrameRate") or 24)
+
+    def timeline_info(self) -> dict[str, Any]:
+        """Return project-sized preview geometry and the current playhead timecode."""
+        project = self._project()
+        timeline = self._timeline()
+
+        def setting(key: str, default: Any) -> Any:
+            try:
+                return timeline.GetSetting(key) or project.GetSetting(key) or default
+            except Exception:
+                return default
+
+        fps = self.timeline_fps()
+        tc = ""
+        try:
+            tc = str(timeline.GetCurrentTimecode() or "")
+        except Exception:
+            pass
+        playhead_frame = 0
+        parts = tc.split(":")
+        if len(parts) == 4:
+            try:
+                hh, mm, ss, ff = (int(part) for part in parts)
+                playhead_frame = ((hh * 3600 + mm * 60 + ss) * int(round(fps))) + ff
+            except ValueError:
+                pass
+        return {
+            "fps": fps,
+            "width": int(setting("timelineResolutionWidth", 1920)),
+            "height": int(setting("timelineResolutionHeight", 1080)),
+            "playhead_timecode": tc,
+            "playhead_frame": playhead_frame,
+        }
+
+    def capture_current_frame(self, image_path: str) -> str | None:
+        """Export the current timeline frame as a temporary PNG and remove its still."""
+        timeline = self._timeline()
+        still = None
+        album = None
+        try:
+            gallery = self.resolve.GetGallery()
+            album = gallery.GetCurrentStillAlbum() if gallery else None
+            still = timeline.GrabStill()
+            if still is None or album is None:
+                return None
+            path = Path(image_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            ok = album.ExportStills([still], str(path.parent), path.stem, "png")
+            if not ok:
+                return None
+            if path.is_file():
+                return str(path)
+            # Resolve appends the still ID to the requested prefix.
+            candidates = sorted(path.parent.glob(f"{path.stem}_*.png"))
+            return str(candidates[0]) if candidates else None
+        finally:
+            if still is not None and album is not None:
+                try:
+                    album.DeleteStills([still])
+                except Exception:
+                    log.warning("Could not remove temporary Resolve preview still", exc_info=True)
+
+    @staticmethod
+    def _textplus_tool(item: Any) -> Any:
+        try:
+            comp = item.GetFusionCompByIndex(1)
+        except Exception:
+            return None
+        if comp is None:
+            return None
+        for name in ("Text1", "TextPlus1", "TextPlus"):
+            try:
+                tool = comp.FindTool(name)
+            except Exception:
+                tool = None
+            if tool is not None:
+                return comp, tool
+        return comp, None
+
+    @classmethod
+    def _apply_caption_style(
+        cls,
+        item: Any,
+        caption: dict[str, Any],
+        settings: dict[str, Any],
+        *,
+        project_width: int = 1920,
+        project_height: int = 1080,
+    ) -> None:
+        """Apply the common Text+ Inspector controls to a generated title."""
+        text_color = cls._hex_rgb(settings.get("text_color", "#FFFFFF"))
+        outline_color = cls._hex_rgb(settings.get("outline_color", "#000000"))
+        shadow_color = cls._hex_rgb(settings.get("shadow_color", "#000000"))
+        props: dict[str, Any] = {
+            "StyledText": caption["text"],
+            "Font": settings.get("font_family") or "Arial",
+            "Style": settings.get("font_style", "Regular"),
+            "FontSize": float(settings.get("font_size", 96)) / max(1, project_height),
+            "Tracking": float(settings.get("tracking", 1.0)),
+            "LineSpacing": float(settings.get("line_spacing", 1.0)),
+            "HorizontalJustification": {
+                "left": "Left", "center": "Center", "right": "Right"
+            }.get(str(settings.get("alignment", "center")), "Center"),
+            "PositionX": float(settings.get("position_x", 0.5)),
+            "PositionY": float(settings.get("position_y", 0.85)),
+            "AnchorPointX": (float(settings.get("anchor_x", 0.5)) - 0.5) * project_width,
+            "AnchorPointY": (0.5 - float(settings.get("anchor_y", 0.5))) * project_height,
+            "ZoomX": float(settings.get("scale_x", 1.0)),
+            "ZoomY": float(settings.get("scale_y", 1.0)),
+            "RotationAngle": float(settings.get("rotation", 0.0)),
+            "LayoutType": settings.get("layout_type", "Frame"),
+            "Width": float(settings.get("layout_width", 1.0)),
+            "Height": float(settings.get("layout_height", 1.0)),
+            "VerticalJustification": str(
+                settings.get("vertical_alignment", "center")
+            ).capitalize(),
+            "ColorRed": text_color[0], "ColorGreen": text_color[1],
+            "ColorBlue": text_color[2], "ColorAlpha": 1.0,
+            "OutlineEnabled": bool(settings.get("outline_enabled", False)),
+            "OutlineRed": outline_color[0], "OutlineGreen": outline_color[1],
+            "OutlineBlue": outline_color[2],
+            "OutlineWidth": float(settings.get("outline_width", 2.0)),
+            "OutlineAlpha": float(settings.get("outline_opacity", 1.0)),
+            "ShadowEnabled": bool(settings.get("shadow_enabled", False)),
+            "ShadowRed": shadow_color[0], "ShadowGreen": shadow_color[1],
+            "ShadowBlue": shadow_color[2],
+            "ShadowOpacity": float(settings.get("shadow_opacity", 0.65)),
+            "Opacity": float(settings.get("image_opacity", 1.0)) * 100.0,
+        }
+        # The Resolve TimelineItem property layer exposes a subset of title
+        # controls directly. Fusion inputs cover Text+ properties on builds
+        # where that layer does not forward a control.
+        tool_result = cls._textplus_tool(item)
+        comp, tool = tool_result if tool_result else (None, None)
+        aliases = {
+            "FontSize": "Size",
+            "PositionX": "Center",
+            "PositionY": "Center",
+            "RotationAngle": "Angle",
+            "ColorAlpha": "Alpha1",
+            "OutlineEnabled": "Enabled2",
+            "OutlineRed": "Red2",
+            "OutlineGreen": "Green2",
+            "OutlineBlue": "Blue2",
+            "OutlineWidth": "Thickness2",
+            "OutlineAlpha": "Alpha2",
+            "ShadowEnabled": "Enabled3",
+            "ShadowRed": "Red3",
+            "ShadowGreen": "Green3",
+            "ShadowBlue": "Blue3",
+            "ShadowOpacity": "Alpha3",
+            "LayoutType": "LayoutType",
+            "Width": "Width",
+            "Height": "Height",
+            "Opacity": "Opacity",
+        }
+        input_values = {
+            "HorizontalJustification": {"Left": 0, "Center": 1, "Right": 2}.get(
+                str(props["HorizontalJustification"]), 1
+            ),
+            "VerticalJustification": {"Top": 0, "Center": 1, "Bottom": 2}.get(
+                str(props["VerticalJustification"]), 1
+            ),
+            "LayoutType": {"Point": 0, "Frame": 1}.get(
+                str(props["LayoutType"]), 1
+            ),
+            "OutlineWidth": float(props["OutlineWidth"])
+            / max(1, int(settings.get("font_size", 96))),
+        }
+        required = {
+            "StyledText", "Font", "FontSize", "PositionX", "PositionY",
+            "ColorRed", "ColorGreen", "ColorBlue", "ColorAlpha",
+        }
+        for key, value in props.items():
+            try:
+                applied = item.SetProperty(key, value)
+            except Exception:
+                applied = False
+            if bool(applied):
+                continue
+            if tool is None:
+                if key in required:
+                    raise ResolveError(
+                        f"Resolve could not apply Text+ setting '{key}' to a caption."
+                    )
+                continue
+            input_key = aliases.get(key, key)
+            try:
+                if key in ("PositionX", "PositionY"):
+                    center = (
+                        (value, tool.Center[1])
+                        if key == "PositionX"
+                        else (tool.Center[0], value)
+                    )
+                    tool.Center = center
+                else:
+                    input_value = input_values.get(key, value)
+                    if hasattr(tool, "SetInput"):
+                        tool.SetInput(input_key, input_value)
+                    else:
+                        setattr(tool, input_key, input_value)
+            except Exception:
+                # Text+ inputs vary slightly between Resolve releases. An
+                # unsupported optional shading property should not prevent
+                # otherwise valid captions from being generated.
+                if key in required:
+                    raise ResolveError(
+                        f"Resolve could not apply Text+ setting '{key}' to a caption."
+                    )
+                log.debug("Text+ input %s not available", input_key, exc_info=True)
+
+        if bool(settings.get("write_on")) and (tool is None or comp is None):
+            raise ResolveError("Resolve did not expose the Text+ controls needed for write-on.")
+        if bool(settings.get("write_on")) and tool is not None and comp is not None:
+            start = int(caption["start_frame"])
+            finish = int(caption.get("write_on_end_frame", start))
+            duration = max(0, finish - start)
+            try:
+                spline = comp.BezierSpline()
+                spline[0] = 0.0
+                spline[duration] = 1.0
+                tool.WriteOnEnd = spline
+            except Exception as e:
+                raise ResolveError(f"Could not keyframe Text+ write-on: {e}") from e
+
+    def create_captions(
+        self,
+        clip: ClipInfo | str,
+        captions: list[dict[str, Any]],
+        settings: dict[str, Any],
+    ) -> int:
+        """Add Text+ title clips above the selected clip on the current timeline."""
+        host_clip = self._lookup_clip(clip)
+        if host_clip.track_type != "video":
+            raise ResolveError("Choose a video clip before creating captions.")
+        if not captions:
+            raise ResolveError("There are no caption segments to create.")
+        timeline = self._timeline()
+        try:
+            project_width = int(timeline.GetSetting("timelineResolutionWidth") or 1920)
+            project_height = int(timeline.GetSetting("timelineResolutionHeight") or 1080)
+        except Exception:
+            project_width, project_height = 1920, 1080
+        add_title = getattr(timeline, "AddFusionTitleClip", None)
+        if not callable(add_title):
+            raise ResolveError(
+                "This Resolve host does not expose Timeline.AddFusionTitleClip, which Captain "
+                "needs to place Text+ titles at exact frame ranges."
+            )
+
+        track_count = int(timeline.GetTrackCount("video") or 0)
+        added_track = False
+        if track_count == 0:
+            if not timeline.AddTrack("video"):
+                raise ResolveError("Could not create a video track for captions.")
+            track_count = int(timeline.GetTrackCount("video") or 1)
+            added_track = True
+        track_index = track_count
+        overlaps = False
+        for item in timeline.GetItemListInTrack("video", track_index) or []:
+            try:
+                item_start, item_end = int(item.GetStart()), int(item.GetEnd())
+            except Exception:
+                continue
+            if any(
+                int(c["start_frame"]) < item_end
+                and item_start < int(c["end_frame"])
+                for c in captions
+            ):
+                overlaps = True
+                break
+        if overlaps:
+            if not timeline.AddTrack("video"):
+                raise ResolveError(
+                    "The top video track is occupied and Resolve could not add a new one."
+                )
+            track_index = int(timeline.GetTrackCount("video"))
+            added_track = True
+
+        items: list[Any] = []
+        try:
+            for caption in captions:
+                start = int(caption["start_frame"])
+                end = int(caption["end_frame"])
+                if end <= start:
+                    continue
+                title = add_title("Text+", track_index, start, end - start)
+                if title is None:
+                    raise ResolveError(
+                        f"Resolve could not create the caption at frame {start}."
+                    )
+                items.append(title)
+                self._apply_caption_style(
+                    title,
+                    caption,
+                    settings,
+                    project_width=project_width,
+                    project_height=project_height,
+                )
+            if not items:
+                raise ResolveError("Resolve did not create any caption titles.")
+            return len(items)
+        except Exception as e:
+            if items:
+                try:
+                    timeline.DeleteClips(items, False)
+                except Exception:
+                    log.error("Could not roll back partial caption insertion", exc_info=True)
+            if added_track:
+                try:
+                    if not (timeline.GetItemListInTrack("video", track_index) or []):
+                        timeline.DeleteTrack("video", track_index)
+                except Exception:
+                    log.warning("Could not remove empty caption track", exc_info=True)
+            if isinstance(e, ResolveError):
+                raise
+            raise ResolveError(f"Caption generation failed: {e}") from e
+
+    @staticmethod
+    def _hex_rgb(value: Any) -> tuple[float, float, float]:
+        text = str(value or "#FFFFFF").lstrip("#")
+        try:
+            return tuple(int(text[i:i + 2], 16) / 255.0 for i in (0, 2, 4))  # type: ignore[return-value]
+        except (ValueError, IndexError):
+            return (1.0, 1.0, 1.0)
 
     def list_clips(self) -> list[ClipInfo]:
         """All video and audio clips in the current timeline."""
@@ -589,6 +915,10 @@ class ResolveHandler:
             return self.list_timeline_names()
         if method == "timeline_fps":
             return self.timeline_fps()
+        if method == "timeline_info":
+            return self.timeline_info()
+        if method == "capture_current_frame":
+            return self.capture_current_frame(params["image_path"])
         if method == "list_clips":
             return [c.to_dict() for c in self.list_clips()]
         if method == "clip_under_playhead":
@@ -608,6 +938,10 @@ class ResolveHandler:
             ripple = bool(params.get("ripple", False))
             return bool(
                 self.replace_clip_in_place(params["clip_id"], ranges, ripple=ripple)
+            )
+        if method == "create_captions":
+            return self.create_captions(
+                params["clip_id"], params["captions"], params["settings"]
             )
         raise ResolveError(f"Unknown bridge method: {method}")
 
@@ -652,6 +986,13 @@ class BridgedResolveHandler:
 
     def timeline_fps(self) -> float:
         return float(self._client.call("timeline_fps"))
+
+    def timeline_info(self) -> dict[str, Any]:
+        return dict(self._client.call("timeline_info") or {})
+
+    def capture_current_frame(self, image_path: str) -> str | None:
+        result = self._client.call("capture_current_frame", {"image_path": image_path})
+        return str(result) if result else None
 
     def list_clips(self) -> list[ClipInfo]:
         return [ClipInfo.from_dict(d) for d in self._client.call("list_clips")]
@@ -704,6 +1045,21 @@ class BridgedResolveHandler:
                     "ripple": bool(ripple),
                 },
             )
+        )
+
+    def create_captions(
+        self,
+        clip: ClipInfo | str,
+        captions: list[dict[str, Any]],
+        settings: dict[str, Any],
+    ) -> int:
+        clip_id = clip if isinstance(clip, str) else clip.clip_id
+        return int(
+            self._client.call(
+                "create_captions",
+                {"clip_id": clip_id, "captions": captions, "settings": settings},
+            )
+            or 0
         )
 
     def close(self) -> None:

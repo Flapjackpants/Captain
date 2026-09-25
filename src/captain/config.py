@@ -30,6 +30,7 @@ DEFAULTS: dict[str, Any] = {
     "transcript_word_spacing": 0,
     "transcript_word_pad_x": 1,
     "transcript_word_pad_y": 2,
+    "caption_settings": {},
 }
 
 APPLY_MODES = frozenset({"replace_in_place", "replace_ripple", "new_timeline"})

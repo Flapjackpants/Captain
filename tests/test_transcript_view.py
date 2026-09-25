@@ -6,7 +6,8 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
+from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication
 
 from captain.gui.transcript_view import KIND_ROLE, TranscriptModel, TranscriptView
@@ -127,6 +128,49 @@ def test_delete_word_toggle_is_undoable(qapp):
 
     assert view.redo()
     assert tr.removed == {1}
+
+
+def test_return_inserts_caption_break_before_focused_word_and_undoes(qapp):
+    view = _view_with_words(["one", "two", "three"], qapp=qapp)
+    tr = view.transcript
+    assert tr is not None
+    view.select_word(1)
+
+    event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier)
+    qapp.sendEvent(view, event)
+    assert tr.caption_breaks == {1}
+    assert [line.word_indices for line in tr.lines()] == [(0,), (1, 2)]
+    assert view.undo()
+    assert tr.caption_breaks == set()
+
+
+def test_backspace_merges_manual_caption_break(qapp):
+    view = _view_with_words(["one", "two", "three"], qapp=qapp)
+    tr = view.transcript
+    assert tr is not None
+    view.select_word(1)
+    qapp.sendEvent(
+        view,
+        QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier),
+    )
+    qapp.sendEvent(
+        view,
+        QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Backspace, Qt.KeyboardModifier.NoModifier),
+    )
+    assert tr.caption_breaks == set()
+
+    view.select_word(1)
+    qapp.sendEvent(
+        view,
+        QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier),
+    )
+    view.select_word(1)
+    qapp.sendEvent(
+        view,
+        QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Backspace, Qt.KeyboardModifier.NoModifier),
+    )
+    assert tr.caption_breaks == set()
+    assert tr.removed == set()
 
 
 def test_delete_trims_short_visible_silence_with_zero_pause(qapp):
@@ -294,4 +338,3 @@ def test_mouse_drag_backward_and_margins(qapp):
     # Dragged from 2 forward into margin of that line: words 2 and 3 should be selected
     assert 2 in view._selected_word_indices()
     assert 3 in view._selected_word_indices()
-

@@ -804,13 +804,85 @@ class TranscriptView(QListView):
 
     def keyPressEvent(self, event) -> None:
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            selected_words = self._selected_word_indices()
+            if (
+                event.key() == Qt.Key.Key_Backspace
+                and (
+                    not selected_words
+                    or selected_words == [self._current_word_index()]
+                )
+                and self._merge_caption_break_at_current()
+            ):
+                event.accept()
+                return
             self.delete_selection()
+        elif event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.insert_caption_break()
+            event.accept()
+            return
         elif event.matches(QKeySequence.StandardKey.Cut):
             self.cut_selection()
         elif event.matches(QKeySequence.StandardKey.Paste):
             self.paste_at_current()
         else:
             super().keyPressEvent(event)
+
+    def _current_word_index(self) -> int | None:
+        current = self.currentIndex()
+        if not current.isValid():
+            return None
+        return self._model.word_index(current.row())
+
+    def _focus_word(self, word_index: int) -> None:
+        row = self._model.row_for_word(word_index)
+        if row < 0:
+            return
+        index = self._model.index(row)
+        selection = self.selectionModel()
+        selection.clearSelection()
+        selection.setCurrentIndex(index, selection.SelectionFlag.NoUpdate)
+        self._select_anchor = row
+        self.scrollTo(index, QListView.ScrollHint.PositionAtCenter)
+
+    def insert_caption_break(self) -> bool:
+        """Insert a persistent boundary before the selection/current word."""
+        if self.transcript is None:
+            return False
+        selected = self._selected_word_indices()
+        if selected:
+            before_word = selected[0]
+        else:
+            before_word = self._current_word_index()
+        if before_word is None:
+            return False
+        if (
+            before_word not in self.transcript.order
+            or before_word in self.transcript.caption_breaks
+        ):
+            return False
+        if any(line.start_word == before_word for line in self.transcript.lines()):
+            return False
+        self.push_history()
+        if not self.transcript.add_caption_break(before_word):
+            return False
+        self._model.refresh()
+        self._focus_word(before_word)
+        self.edited.emit()
+        return True
+
+    def _merge_caption_break_at_current(self) -> bool:
+        """Remove a manual break at the current word for Backspace."""
+        if self.transcript is None:
+            return False
+        word = self._current_word_index()
+        if word is None or word not in self.transcript.caption_breaks:
+            return False
+        self.push_history()
+        self.transcript.remove_caption_break(word)
+        self._model.refresh()
+        self._focus_word(word)
+        self.edited.emit()
+        return True
 
     def _on_click(self, index: QModelIndex) -> None:
         kind = self._model.data(index, KIND_ROLE)

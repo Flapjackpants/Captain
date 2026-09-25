@@ -51,10 +51,16 @@ class Transcript:
     removed: set[int] = field(default_factory=set)
     silence_cuts: list[tuple[float, float]] = field(default_factory=list)
     script_text: str = ""  # raw imported script (Phase 2); alignment recomputed on load
+    # Word indices at which the user inserted a manual caption break.
+    # Breaks are anchored to words so they remain associated through reorders.
+    caption_breaks: set[int] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         if not self.order:
             self.order = [w.index for w in self.words]
+        self.caption_breaks = {
+            int(i) for i in self.caption_breaks if 0 <= int(i) < len(self.words)
+        }
 
     # ---- edit ops -------------------------------------------------------
 
@@ -75,6 +81,26 @@ class Transcript:
     def is_reordered(self) -> bool:
         return self.order != sorted(self.order)
 
+    def add_caption_break(self, before_word: int) -> bool:
+        """Add a manual caption boundary before ``before_word``.
+
+        Returns False if the word is invalid or already begins a transcript
+        line (including an existing manual boundary).
+        """
+        if before_word not in self.order or before_word in self.caption_breaks:
+            return False
+        if any(line.start_word == before_word for line in self.lines()):
+            return False
+        self.caption_breaks.add(before_word)
+        return True
+
+    def remove_caption_break(self, before_word: int) -> bool:
+        """Remove a user-created boundary; automatic Whisper lines remain."""
+        if before_word not in self.caption_breaks:
+            return False
+        self.caption_breaks.remove(before_word)
+        return True
+
     # ---- lines / search -------------------------------------------------
 
     def lines(self, pause_gap: float = PAUSE_LINE_GAP) -> list[TranscriptLine]:
@@ -88,6 +114,9 @@ class Transcript:
         for widx in self.order:
             word = self.words[widx]
             if not current:
+                current = [widx]
+            elif widx in self.caption_breaks:
+                groups.append(current)
                 current = [widx]
             elif has_segments and word.segment_id == prev.segment_id:  # type: ignore[union-attr]
                 current.append(widx)
@@ -189,6 +218,7 @@ class Transcript:
         self.order = [w.index for w in self.words]
         self.removed = set()
         self.silence_cuts = []
+        self.caption_breaks = set()
 
     def to_json(self, *, clean: bool = False) -> str:
         """Serialize the transcript.
@@ -200,10 +230,12 @@ class Transcript:
             order = [w.index for w in self.words]
             removed: list[int] = []
             silence_cuts: list[tuple[float, float]] = []
+            caption_breaks: list[int] = []
         else:
             order = self.order
             removed = sorted(self.removed)
             silence_cuts = self.silence_cuts
+            caption_breaks = sorted(self.caption_breaks)
         return json.dumps(
             {
                 "source_path": self.source_path,
@@ -221,6 +253,7 @@ class Transcript:
                 "removed": removed,
                 "silence_cuts": silence_cuts,
                 "script_text": self.script_text,
+                "caption_breaks": caption_breaks,
             },
             indent=2,
         )
@@ -246,6 +279,7 @@ class Transcript:
             removed=set(d.get("removed", [])),
             silence_cuts=[tuple(c) for c in d.get("silence_cuts", [])],
             script_text=d.get("script_text", "") or "",
+            caption_breaks=set(d.get("caption_breaks", [])),
         )
 
     def save(self, path: Path, *, clean: bool = False) -> None:
@@ -414,6 +448,7 @@ class EditSnapshot:
     order: tuple[int, ...]
     removed: frozenset[int]
     silence_cuts: tuple[tuple[float, float], ...]
+    caption_breaks: frozenset[int] = frozenset()
 
 
 class EditHistory:
@@ -458,6 +493,7 @@ def snapshot_transcript(transcript: Transcript) -> EditSnapshot:
         order=tuple(transcript.order),
         removed=frozenset(transcript.removed),
         silence_cuts=tuple(tuple(c) for c in transcript.silence_cuts),
+        caption_breaks=frozenset(transcript.caption_breaks),
     )
 
 
@@ -465,6 +501,7 @@ def apply_snapshot(transcript: Transcript, snap: EditSnapshot) -> None:
     transcript.order = list(snap.order)
     transcript.removed = set(snap.removed)
     transcript.silence_cuts = [tuple(c) for c in snap.silence_cuts]
+    transcript.caption_breaks = set(snap.caption_breaks)
 
 
 def media_sec_to_timeline_frame(
