@@ -38,6 +38,46 @@ from PySide6.QtWidgets import (
 from ..captions import normalize_caption_settings
 
 
+def _caption_font(settings: dict[str, Any]) -> QFont:
+    font = QFont(str(settings.get("font_family") or "Arial"))
+    style = str(settings.get("font_style", "Regular")).lower()
+    font.setBold("bold" in style)
+    font.setItalic("italic" in style)
+    font.setPixelSize(max(1, int(settings.get("font_size", 96))))
+    return font
+
+
+def caption_line_width(text: str, settings: dict[str, Any]) -> float:
+    """Widest line of `text` in project pixels, as the preview draws it."""
+    metrics = QFontMetricsF(_caption_font(normalize_caption_settings(settings)))
+    return max((metrics.horizontalAdvance(line) for line in text.split("\n")), default=0.0)
+
+
+def wrap_caption_text(text: str, settings: dict[str, Any], project_width: int) -> str:
+    """Break `text` at the same width the caption preview uses."""
+    normalized = normalize_caption_settings(settings)
+    if normalized.get("layout_type", "Frame") != "Frame":
+        return text
+    width = max(1.0, int(project_width) * 0.90 * float(normalized.get("layout_width", 1.0)))
+    font = _caption_font(normalized)
+    layout = QTextLayout(text, font)
+    option = QTextOption()
+    option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+    layout.setTextOption(option)
+    layout.beginLayout()
+    lines: list[str] = []
+    while True:
+        line = layout.createLine()
+        if not line.isValid():
+            break
+        line.setLineWidth(width)
+        chunk = text[line.textStart() : line.textStart() + line.textLength()].strip()
+        if chunk:
+            lines.append(chunk)
+    layout.endLayout()
+    return "\n".join(lines) if lines else text
+
+
 def _color_button(color: str) -> QPushButton:
     button = QPushButton(color)
     button.setProperty("captionColor", color)

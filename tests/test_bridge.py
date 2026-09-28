@@ -338,7 +338,7 @@ def test_direct_caption_generation_uses_a_new_top_track_when_occupied():
     assert len(timeline.tracks[2]) == 1
     title = timeline.tracks[3][0]
     assert title.properties["PositionX"] == pytest.approx(0.6)
-    assert title.properties["FontSize"] == pytest.approx(96 / 1080)
+    assert title.properties["FontSize"] == pytest.approx(96 / 1920)
     assert title.properties["ZoomX"] == pytest.approx(1.5)
     assert title.properties["AnchorPointY"] == pytest.approx(108.0)
 
@@ -576,7 +576,7 @@ def test_textplus_write_on_uses_segment_local_frames_including_single_word():
     }
     ResolveHandler._apply_caption_style(item, caption, {"write_on": True})
     assert item.comp.spline.writes == [(0, 0.0), (0, 1.0)]
-    assert tool.Size == pytest.approx(96 / 1080)
+    assert tool.Size == pytest.approx(96 / 1920)
 
     item.comp.spline = Spline()
     caption["write_on_end_frame"] = 60

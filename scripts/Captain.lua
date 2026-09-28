@@ -392,46 +392,42 @@ local function timeline_info()
     }
 end
 
-local function capture_current_frame(image_path)
+local function capture_current_frame(image_path, keep_track)
+    local project = current_project()
+    local folder = image_path:match("^(.*)/[^/]+$") or "."
+    mkdir_p(folder)
+    -- Caption clips sit on higher video tracks. Their carrier is opaque black,
+    -- so a still of the current composite is black wherever a caption is showing.
     local timeline = current_timeline()
-    local still = nil
-    local album = nil
-    local ok, result = pcall(function()
-        local gallery = resolve:GetGallery()
-        album = gallery and gallery:GetCurrentStillAlbum() or nil
-        still = timeline:GrabStill()
-        if not still or not album then
-            return false
+    local keep = math.floor(safe_number(keep_track, 1))
+    local disabled = {}
+    pcall(function()
+        local count = timeline:GetTrackCount("video") or 0
+        for index = keep + 1, count do
+            local enabled = true
+            pcall(function()
+                enabled = timeline:GetIsTrackEnabled("video", index)
+            end)
+            if enabled ~= false then
+                local turned_off = pcall(function()
+                    timeline:SetTrackEnable("video", index, false)
+                end)
+                if turned_off then
+                    disabled[#disabled + 1] = index
+                end
+            end
         end
-        local folder = image_path:match("^(.*)/[^/]+$") or "."
-        local prefix = image_path:match("([^/]+)%.png$") or "captain-preview"
-        mkdir_p(folder)
-        return album:ExportStills({ still }, folder, prefix, "png")
     end)
-    if still and album then
-        pcall(function() album:DeleteStills({ still }) end)
+    local ok, exported = pcall(function()
+        return project:ExportCurrentFrameAsStill(image_path)
+    end)
+    for _, index in ipairs(disabled) do
+        pcall(function() timeline:SetTrackEnable("video", index, true) end)
     end
-    if not ok or not result then
-        return nil
-    end
-    if file_exists(image_path) then
+    if ok and exported and file_exists(image_path) then
         return image_path
     end
-    local function shell_quote(value)
-        return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
-    end
-    local folder = image_path:match("^(.*)/[^/]+$") or "."
-    local prefix = image_path:match("([^/]+)%.png$") or "captain-preview"
-    local command = "find " .. shell_quote(folder)
-        .. " -maxdepth 1 -type f -name " .. shell_quote(prefix .. "_*.png")
-        .. " -print -quit"
-    local pipe = io.popen(command, "r")
-    if not pipe then
-        return nil
-    end
-    local exported_path = pipe:read("*l")
-    pipe:close()
-    return exported_path
+    return nil
 end
 
 local function render_clip_audio(clip_id, output_path)
@@ -794,6 +790,11 @@ local function find_textplus_tool(comp)
     return nil
 end
 
+-- Ratio between the preview's glyph width and Text+ Size, measured once per
+-- create_captions call on the first caption and reused for the rest.
+local caption_size_scale = nil
+local caption_size_measured = false
+
 local function set_textplus_property(item, tool, property_name, value, input_name, input_value)
     local ok, result = pcall(function()
         return item:SetProperty(property_name, value)
@@ -810,6 +811,43 @@ local function set_textplus_property(item, tool, property_name, value, input_nam
         end
     end
     return false
+end
+
+-- Text+ reports a domain of definition with fixed padding around the glyphs.
+-- Measuring at Size and Size/2 separates that padding from the glyph width,
+-- then solves for the Size whose glyph width equals the preview's.
+local function match_preview_size(tool, comp, text_size, target_px, frame_w)
+    local function dod_width(dod)
+        local left = tonumber(dod[1] or dod.left)
+        local right = tonumber(dod[3] or dod.right)
+        return (left and right) and math.abs(right - left) or 0
+    end
+    local solved = nil
+    local locked = pcall(function() comp:Lock() end)
+    pcall(function()
+        local time = 200
+        pcall(function() tool:Render() end)
+        tool.Output:GetValue(time)
+        local full = tool.Output:GetDoD(time)
+        if type(full) ~= "table" then
+            return
+        end
+        local full_w = dod_width(full)
+        tool:SetInput("Size", text_size * 0.5)
+        local half = tool.Output:GetDoD(time)
+        tool:SetInput("Size", text_size)
+        local half_w = type(half) == "table" and dod_width(half) or 0
+        local per_size = (full_w - half_w) / (text_size * 0.5)
+        local padding = full_w - per_size * text_size
+        if full_w > 4 and half_w > 0 and half_w < full_w and per_size > 0
+            and full_w < frame_w * 0.98 then
+            solved = (target_px - padding) / per_size
+        end
+    end)
+    if locked then
+        pcall(function() comp:Unlock() end)
+    end
+    return solved
 end
 
 local function apply_caption_style(item, caption, settings)
@@ -846,14 +884,11 @@ local function apply_caption_style(item, caption, settings)
     local alignment = tostring(settings.alignment or "center")
     alignment = alignment:sub(1, 1):upper() .. alignment:sub(2)
     local alignment_input = ({ Left = 0, Center = 1, Right = 2 })[alignment] or 1
-    local vertical_input = ({ Top = 0, Center = 1, Bottom = 2 })[vertical] or 1
-    local layout_type = tostring(settings.layout_type or "Frame")
-    local layout_input = layout_type == "Point" and 0 or 1
     local values = {
         { "StyledText", caption.text, "StyledText" },
         { "Font", settings.font_family or "Arial", "Font" },
         { "Style", settings.font_style or "Regular", "Style" },
-        { "FontSize", font_size / math.max(1, height), "Size" },
+        { "FontSize", font_size / math.max(1, width), "Size" },
         { "Tracking", tonumber(settings.tracking) or 1.0, "Tracking" },
         { "LineSpacing", tonumber(settings.line_spacing) or 1.0, "LineSpacing" },
         { "HorizontalJustification", alignment, "HorizontalJustification", alignment_input },
@@ -864,10 +899,6 @@ local function apply_caption_style(item, caption, settings)
         { "ZoomX", tonumber(settings.scale_x) or 1.0, "ZoomX" },
         { "ZoomY", tonumber(settings.scale_y) or 1.0, "ZoomY" },
         { "RotationAngle", tonumber(settings.rotation) or 0, "Angle" },
-        { "LayoutType", layout_type, "LayoutType", layout_input },
-        { "Width", tonumber(settings.layout_width) or 1.0, "Width" },
-        { "Height", tonumber(settings.layout_height) or 1.0, "Height" },
-        { "VerticalJustification", vertical, "VerticalJustification", vertical_input },
         { "ColorRed", tr, "Red1" }, { "ColorGreen", tg, "Green1" },
         { "ColorBlue", tb, "Blue1" }, { "ColorAlpha", 1.0, "Alpha1" },
         { "OutlineEnabled", settings.outline_enabled and 1 or 0, "Enabled2" },
@@ -891,6 +922,48 @@ local function apply_caption_style(item, caption, settings)
         local applied = set_textplus_property(item, tool, entry[1], entry[2], entry[3], entry[4])
         if not applied and required[entry[1]] then
             error("Resolve could not apply Text+ setting '" .. entry[1] .. "' to a caption.")
+        end
+    end
+    if tool then
+        local pos_x = tonumber(settings.position_x) or 0.5
+        local pos_y = tonumber(settings.position_y) or 0.85
+        local anchor_x = tonumber(settings.anchor_x) or 0.5
+        local anchor_y = tonumber(settings.anchor_y) or 0.5
+        local layout_w = 0.90 * (tonumber(settings.layout_width) or 1.0)
+        local layout_h = 0.80 * (tonumber(settings.layout_height) or 1.0)
+        -- Preview safe box, top-down, shifted by (position - anchor). Its center
+        -- is where the preview draws the text block. Text+ Y grows upward.
+        local box_cx = (0.05 + layout_w / 2) + (pos_x - anchor_x)
+        local box_cy = (0.10 + layout_h / 2) + (pos_y - anchor_y)
+        local fusion_y = 1 - box_cy
+        local anchor = ({ top = -1, center = 0, bottom = 1 })[string.lower(vertical)] or 0
+        -- Text+ Size is a fraction of frame width. The preview's pixel size
+        -- matches Size * width, not Size * height.
+        local text_size = font_size / math.max(1, width)
+        pcall(function()
+            tool:SetInput("Size", text_size)
+            tool:SetInput("LayoutType", 0)
+            tool:SetInput("Center", { box_cx, fusion_y })
+            tool:SetInput("VerticalTopCenterBottom", anchor)
+            tool:SetInput("LayoutWidth", layout_w)
+            tool:SetInput("LayoutHeight", layout_h)
+        end)
+        local width_read = nil
+        pcall(function() width_read = tonumber(tool:GetInput("LayoutWidth")) end)
+        if width_read and math.abs(width_read - layout_w) < 0.02 then
+            pcall(function() tool:SetInput("LayoutType", 1) end)
+        end
+        local target_px = tonumber(settings.preview_first_width_px)
+        if not caption_size_measured and comp and target_px and target_px > 1 then
+            caption_size_measured = true
+            local solved = match_preview_size(tool, comp, text_size, target_px, width)
+            local scale = solved and solved / text_size or nil
+            if scale and scale >= 0.5 and scale <= 4 then
+                caption_size_scale = scale
+            end
+        end
+        if caption_size_scale then
+            pcall(function() tool:SetInput("Size", text_size * caption_size_scale) end)
         end
     end
     if settings.write_on and (not tool or not comp) then
@@ -923,6 +996,8 @@ local function create_captions(clip_id, captions, settings)
     if not captions or #captions == 0 then
         error("There are no caption segments to create.")
     end
+    caption_size_scale = nil
+    caption_size_measured = false
     local timeline = current_timeline()
     local track_count = safe_number(timeline:GetTrackCount("video"), 0)
     local added_track = false
@@ -1457,7 +1532,7 @@ local function dispatch(method, params)
     elseif method == "timeline_info" then
         return timeline_info()
     elseif method == "capture_current_frame" then
-        return capture_current_frame(params.image_path)
+        return capture_current_frame(params.image_path, params.keep_track)
     elseif method == "render_clip_audio" then
         return render_clip_audio(params.clip_id, params.output_path)
     elseif method == "list_clips" then

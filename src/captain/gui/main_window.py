@@ -56,7 +56,7 @@ from ..transcript import (
     merge_timeline_transcripts,
 )
 from .script_view import ScriptView
-from .caption_dialog import CaptionSettingsDialog
+from .caption_dialog import CaptionSettingsDialog, caption_line_width, wrap_caption_text
 from .settings_dialog import SettingsDialog
 from .transcript_view import TranscriptView
 
@@ -1028,7 +1028,9 @@ class MainWindow(QMainWindow):
             with tempfile.TemporaryDirectory(prefix="captain_caption_preview_") as tmp:
                 image_path = str(Path(tmp) / "timeline-frame.png")
                 try:
-                    captured_path = self.resolve.capture_current_frame(image_path)
+                    captured_path = self.resolve.capture_current_frame(
+                        image_path, getattr(clip, "track_index", 1)
+                    )
                 except Exception as capture_error:
                     log.warning("Could not capture Resolve timeline frame: %s", capture_error)
                     captured_path = None
@@ -1080,11 +1082,22 @@ class MainWindow(QMainWindow):
             return
         self.cfg["caption_settings"] = settings
         config.save_config(self.cfg)
+        project_width = int(timeline_info.get("width", 1920))
+        caption_payload = []
+        for segment in captions:
+            data = segment.to_dict()
+            data["text"] = wrap_caption_text(data["text"], settings, project_width)
+            caption_payload.append(data)
+        # Resolve scales Text+ Size until its first caption is this wide.
+        resolve_settings = dict(settings)
+        resolve_settings["preview_first_width_px"] = (
+            caption_line_width(caption_payload[0]["text"], settings) if caption_payload else 0.0
+        )
         try:
             count = self.resolve.create_captions(
                 self._caption_anchor_clip or clip,
-                [segment.to_dict() for segment in captions],
-                settings,
+                caption_payload,
+                resolve_settings,
             )
         except ResolveError as e:
             QMessageBox.critical(self, "Create Captions", str(e))

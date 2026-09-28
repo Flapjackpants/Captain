@@ -272,14 +272,32 @@ class ResolveHandler:
             "playhead_frame": playhead_frame,
         }
 
-    def capture_current_frame(self, image_path: str) -> str | None:
+    def capture_current_frame(self, image_path: str, keep_track: int | None = None) -> str | None:
         """Export the current timeline frame as a temporary PNG and remove its still."""
         timeline = self._timeline()
+        project = self._project()
+        path = Path(image_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        export_still = getattr(project, "ExportCurrentFrameAsStill", None)
+        if callable(export_still):
+            try:
+                if export_still(str(path)) and path.is_file():
+                    return str(path)
+            except Exception:
+                log.warning("Could not export the current Resolve frame", exc_info=True)
         still = None
         album = None
         try:
-            gallery = self.resolve.GetGallery()
+            gallery = None
+            get_gallery = getattr(project, "GetGallery", None)
+            if callable(get_gallery):
+                gallery = get_gallery()
+            if gallery is None:
+                gallery = self.resolve.GetGallery()
             album = gallery.GetCurrentStillAlbum() if gallery else None
+            if gallery is not None and album is None:
+                albums = gallery.GetGalleryStillAlbums() or []
+                album = albums[0] if albums else None
             still = timeline.GrabStill()
             if still is None or album is None:
                 return None
@@ -491,7 +509,7 @@ class ResolveHandler:
             "StyledText": caption["text"],
             "Font": settings.get("font_family") or "Arial",
             "Style": settings.get("font_style", "Regular"),
-            "FontSize": float(settings.get("font_size", 96)) / max(1, project_height),
+            "FontSize": float(settings.get("font_size", 96)) / max(1, project_width),
             "Tracking": float(settings.get("tracking", 1.0)),
             "LineSpacing": float(settings.get("line_spacing", 1.0)),
             "HorizontalJustification": {
@@ -504,9 +522,6 @@ class ResolveHandler:
             "ZoomX": float(settings.get("scale_x", 1.0)),
             "ZoomY": float(settings.get("scale_y", 1.0)),
             "RotationAngle": float(settings.get("rotation", 0.0)),
-            "LayoutType": settings.get("layout_type", "Frame"),
-            "Width": float(settings.get("layout_width", 1.0)),
-            "Height": float(settings.get("layout_height", 1.0)),
             "VerticalJustification": str(
                 settings.get("vertical_alignment", "center")
             ).capitalize(),
@@ -557,9 +572,7 @@ class ResolveHandler:
             "VerticalJustification": {"Top": 0, "Center": 1, "Bottom": 2}.get(
                 str(props["VerticalJustification"]), 1
             ),
-            "LayoutType": {"Point": 0, "Frame": 1}.get(
-                str(props["LayoutType"]), 1
-            ),
+            "LayoutType": 0,
             "OutlineWidth": float(props["OutlineWidth"])
             / max(1, int(settings.get("font_size", 96))),
         }
@@ -604,6 +617,30 @@ class ResolveHandler:
                         f"Resolve could not apply Text+ setting '{key}' to a caption."
                     )
                 log.debug("Text+ input %s not available", input_key, exc_info=True)
+
+        if tool is not None and hasattr(tool, "SetInput"):
+            pos_x = float(settings.get("position_x", 0.5))
+            pos_y = float(settings.get("position_y", 0.85))
+            anchor_x = float(settings.get("anchor_x", 0.5))
+            anchor_y = float(settings.get("anchor_y", 0.5))
+            layout_w = 0.90 * float(settings.get("layout_width", 1.0))
+            layout_h = 0.80 * float(settings.get("layout_height", 1.0))
+            # Same box the preview draws, with Y flipped because Text+ Y grows upward.
+            box_cx = (0.05 + layout_w / 2) + (pos_x - anchor_x)
+            box_cy = (0.10 + layout_h / 2) + (pos_y - anchor_y)
+            vertical = str(settings.get("vertical_alignment", "center")).lower()
+            anchor = {"top": -1, "center": 0, "bottom": 1}.get(vertical, 0)
+            tool.SetInput("Size", float(settings.get("font_size", 96)) / max(1, project_width))
+            tool.SetInput("LayoutType", 0)
+            tool.SetInput("Center", (box_cx, 1.0 - box_cy))
+            tool.SetInput("VerticalTopCenterBottom", anchor)
+            tool.SetInput("LayoutWidth", layout_w)
+            tool.SetInput("LayoutHeight", layout_h)
+            try:
+                if abs(float(tool.GetInput("LayoutWidth")) - layout_w) < 0.02:
+                    tool.SetInput("LayoutType", 1)
+            except (TypeError, ValueError, AttributeError):
+                pass
 
         if bool(settings.get("write_on")) and (tool is None or comp is None):
             raise ResolveError("Resolve did not expose the Text+ controls needed for write-on.")
@@ -1243,8 +1280,11 @@ class BridgedResolveHandler:
     def timeline_info(self) -> dict[str, Any]:
         return dict(self._client.call("timeline_info") or {})
 
-    def capture_current_frame(self, image_path: str) -> str | None:
-        result = self._client.call("capture_current_frame", {"image_path": image_path})
+    def capture_current_frame(self, image_path: str, keep_track: int | None = None) -> str | None:
+        result = self._client.call("capture_current_frame", {
+            "image_path": image_path,
+            "keep_track": keep_track,
+        })
         return str(result) if result else None
 
     def render_clip_audio(self, clip: ClipInfo | str, output_path: str) -> str:
