@@ -1582,6 +1582,14 @@ local ok_main, err_main = pcall(function()
     if not python or not app_dir then
         error("install.json is missing python/app_dir")
     end
+    -- A moved or deleted checkout leaves stale paths; the spawn below would
+    -- then fail before its log redirect and the UI would never appear.
+    if not file_exists(python) or not file_exists(app_dir .. "/src/captain/main.py") then
+        local msg = "Captain install not found at " .. app_dir
+            .. ". Re-run setupfiles/install-mac.sh from the current checkout."
+        script_log(msg)
+        error(msg)
+    end
 
     local bridge_dir = data_dir() .. "/bridge"
     mkdir_p(bridge_dir)
