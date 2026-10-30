@@ -54,8 +54,12 @@ cut-paste · Cmd+Z / Cmd+Shift+Z undo/redo · click jumps the playhead ·
 show long gaps; struck = will be trimmed.
 
 **Captions:** Select a video clip or place the playhead over one, then click
-**Create Captions**. Press Return in the transcript to add a caption break before
-the selected or focused word; Backspace merges breaks, and undo/redo is supported.
+**Create Captions**. Captions are Text+ title clips appended from a template in the
+Media Pool's `Captain` bin. The installer copies `scripts/caption-template.drb` (a
+Resolve bin export containing one Text+ title) and Captain imports it on first use;
+without it, drag Text+ from Effects → Titles into a `Captain` bin once.
+Return splits a line at the caret; Backspace at a line start (or Delete) merges it
+into the previous line; right-click a line for merge/split. Undo/redo is supported.
 Style and preview Text+ titles, with auto-fit, word-by-word, hold-through-silence,
 linked scale controls, and optional write-on. Fusion and compound timeline clips
 can be transcribed using audio rendered from their selected timeline range. To

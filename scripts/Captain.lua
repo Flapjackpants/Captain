@@ -396,8 +396,7 @@ local function capture_current_frame(image_path, keep_track)
     local project = current_project()
     local folder = image_path:match("^(.*)/[^/]+$") or "."
     mkdir_p(folder)
-    -- Caption clips sit on higher video tracks. Their carrier is opaque black,
-    -- so a still of the current composite is black wherever a caption is showing.
+    -- Caption titles sit on higher video tracks; hide them so the still shows the picture without captions.
     local timeline = current_timeline()
     local keep = math.floor(safe_number(keep_track, 1))
     local disabled = {}
@@ -984,6 +983,63 @@ local function apply_caption_style(item, caption, settings)
     end
 end
 
+local CAPTION_TEMPLATE_BIN = "Captain"
+local NO_CAPTION_TEMPLATE_MSG = "No Text+ caption template found. Drag a Text+ title from "
+    .. "Effects → Titles into the Media Pool's 'Captain' bin, then try again."
+
+local function find_caption_template(media_pool)
+    local function is_title(item)
+        local ok, kind = pcall(function() return item:GetClipProperty("Type") end)
+        if not ok then return false end
+        if type(kind) == "table" then kind = kind.Type end
+        return type(kind) == "string" and string.find(kind, "Title", 1, true) ~= nil
+    end
+    local function walk(folder)
+        local ok_name, name = pcall(function() return folder:GetName() end)
+        if ok_name and name == CAPTION_TEMPLATE_BIN then
+            local ok_clips, clips = pcall(function() return folder:GetClipList() end)
+            if ok_clips and type(clips) == "table" then
+                for _, item in ipairs(clips) do
+                    if is_title(item) then
+                        return item
+                    end
+                end
+            end
+        end
+        local ok_subs, subs = pcall(function() return folder:GetSubFolderList() end)
+        if ok_subs and type(subs) == "table" then
+            for _, sub in ipairs(subs) do
+                local found = walk(sub)
+                if found then
+                    return found
+                end
+            end
+        end
+        return nil
+    end
+    local ok_root, root = pcall(function() return media_pool:GetRootFolder() end)
+    if not ok_root or not root then
+        return nil
+    end
+    return walk(root)
+end
+
+local function caption_template(media_pool)
+    local found = find_caption_template(media_pool)
+    local path = data_dir() .. "/caption-template.drb"
+    if not found and file_exists(path) then
+        pcall(function()
+            media_pool:SetCurrentFolder(media_pool:GetRootFolder())
+            media_pool:ImportFolderFromFile(path)
+        end)
+        found = find_caption_template(media_pool)
+    end
+    if not found then
+        error(NO_CAPTION_TEMPLATE_MSG)
+    end
+    return found
+end
+
 local function create_captions(clip_id, captions, settings)
     local clip = clips_by_id[clip_id]
     if not clip then
@@ -1032,8 +1088,6 @@ local function create_captions(clip_id, captions, settings)
     end
 
     local inserted = {}
-    local template_seeds = {}
-    local place_mode = nil
     local function item_span(item)
         local start_at, end_at, track = -1, -1, -1
         if not item then
@@ -1055,26 +1109,6 @@ local function create_captions(clip_id, captions, settings)
     local function track_fits(got_track)
         return got_track < 0 or got_track == track_index
     end
-    local function go_to(frame)
-        local moved = false
-        pcall(function()
-            moved = timeline:SetCurrentTimecode(
-                frame_to_timecode(math.floor(frame), clip.fps)
-            )
-        end)
-        return moved and true or false
-    end
-    local function insert_textplus()
-        local ok_insert, item = pcall(function()
-            return timeline:InsertFusionTitleIntoTimeline("Text+")
-        end)
-        if ok_insert and item then
-            return item
-        end
-        return nil
-    end
-    local comp_path = nil
-    local carrier_mp = nil
     local function first_item(result)
         if type(result) == "table" then
             return result[1]
@@ -1084,92 +1118,12 @@ local function create_captions(clip_id, captions, settings)
         end
         return nil
     end
-    local function prepare_carrier()
-        if carrier_mp and comp_path then
-            return
-        end
-        local tl_end = 0
-        pcall(function() tl_end = safe_number(timeline:GetEndFrame(), 0) end)
-        go_to(tl_end)
-        local seeded = insert_textplus()
-        if not seeded then
-            error("Resolve could not insert a Text+ title.")
-        end
-        local comp_count = 0
-        pcall(function() comp_count = safe_number(seeded:GetFusionCompCount(), 0) end)
-        mkdir_p(data_dir())
-        comp_path = data_dir() .. "/caption-textplus.comp"
-        local export_ok, exported = false, nil
-        if comp_count > 0 then
-            export_ok, exported = pcall(function()
-                return seeded:ExportFusionComp(comp_path, 1)
-            end)
-        end
-        pcall(function() timeline:DeleteClips({ seeded }, false) end)
-        local comp_file = file_exists(comp_path)
-        if not (export_ok and exported and comp_file) then
-            error("Resolve could not export the Text+ composition used for captions.")
-        end
-        local max_frames = 1
-        for _, caption in ipairs(captions) do
-            local span = safe_number(caption.end_frame, 0) - safe_number(caption.start_frame, 0)
-            if span > max_frames then
-                max_frames = span
-            end
-        end
-        local fps = math.max(1, math.floor(safe_number(clip.fps, 24) + 0.5))
-        local video_path = data_dir() .. "/caption-carrier.mov"
-        local ffmpeg_bin = "ffmpeg"
-        for _, candidate in ipairs({ "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg" }) do
-            local probe = io.popen(candidate .. " -version 2>&1", "r")
-            local header = probe and probe:read("*l") or nil
-            if probe then probe:close() end
-            if header and header:find("ffmpeg", 1, true) then
-                ffmpeg_bin = candidate
-                break
-            end
-        end
-        local quoted = "'" .. video_path:gsub("'", "'\\''") .. "'"
-        local cmd = string.format(
-            "%s -y -f lavfi -i color=c=black:s=16x16:r=%d:d=%.6f -pix_fmt yuv420p -c:v libx264 %s",
-            ffmpeg_bin:find("/", 1, true) and ("'" .. ffmpeg_bin .. "'") or ffmpeg_bin,
-            fps,
-            max_frames / fps,
-            quoted
-        )
-        os.execute(cmd)
-        local video_file = file_exists(video_path)
-        local media_pool = current_project():GetMediaPool()
-        local root = media_pool:GetRootFolder()
-        local captain_bin = nil
-        for _, folder in ipairs(root:GetSubFolderList() or {}) do
-            if folder:GetName() == "Captain" then
-                captain_bin = folder
-                break
-            end
-        end
-        if not captain_bin then
-            captain_bin = media_pool:AddSubFolder(root, "Captain")
-        end
-        if captain_bin then
-            media_pool:SetCurrentFolder(captain_bin)
-        end
-        local ok_import, imported = false, nil
-        if video_file then
-            ok_import, imported = pcall(function()
-                return media_pool:ImportMedia({ video_path })
-            end)
-            carrier_mp = ok_import and first_item(imported) or nil
-        end
-        if not carrier_mp then
-            error("Resolve could not import the caption carrier video.")
-        end
-    end
-    local function append_still(record_frame, source_frames)
+    local template = nil
+    local function append_title(record_frame, source_frames)
         local media_pool = current_project():GetMediaPool()
         local ok_append, appended = pcall(function()
             return media_pool:AppendToTimeline({ {
-                mediaPoolItem = carrier_mp,
+                mediaPoolItem = template,
                 startFrame = 0,
                 endFrame = source_frames,
                 trackIndex = track_index,
@@ -1184,19 +1138,9 @@ local function create_captions(clip_id, captions, settings)
     end
     local function place_caption_title(start_f, end_f)
         local duration = end_f - start_f
-        if type(timeline.AddFusionTitleClip) == "function" then
-            return timeline:AddFusionTitleClip("Text+", track_index, start_f, duration)
-        end
-        prepare_carrier()
-        local placed = append_still(start_f, duration)
+        local placed = append_title(start_f, duration)
         local got_start, got_end, got_track = item_span(placed)
         local fits = placed ~= nil and span_fits(got_start, got_end, start_f, end_f) and track_fits(got_track)
-        local ok_comp, comp = false, nil
-        if fits then
-            ok_comp, comp = pcall(function()
-                return placed:ImportFusionComp(comp_path)
-            end)
-        end
         if not fits then
             if placed then
                 pcall(function() timeline:DeleteClips({ placed }, false) end)
@@ -1209,13 +1153,10 @@ local function create_captions(clip_id, captions, settings)
                 .. " on track " .. tostring(track_index) .. "."
             )
         end
-        if not ok_comp or not comp then
-            pcall(function() timeline:DeleteClips({ placed }, false) end)
-            error("Resolve could not attach the Text+ composition to the caption.")
-        end
         return placed
     end
     local ok, count_or_error = pcall(function()
+        template = caption_template(current_project():GetMediaPool())
         for _, caption in ipairs(captions) do
             local start_f = safe_number(caption.start_frame, -1)
             local end_f = safe_number(caption.end_frame, -1)
@@ -1233,9 +1174,6 @@ local function create_captions(clip_id, captions, settings)
         end
         return #inserted
     end)
-    if #template_seeds > 0 then
-        pcall(function() timeline:DeleteClips(template_seeds, false) end)
-    end
     if not ok then
         if #inserted > 0 then
             pcall(function() timeline:DeleteClips(inserted, false) end)

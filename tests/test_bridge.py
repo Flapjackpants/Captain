@@ -253,197 +253,111 @@ def test_clipinfo_dict_roundtrip():
     assert restored.duration_sec == pytest.approx(100 / 48.0)
 
 
-def test_direct_caption_generation_uses_a_new_top_track_when_occupied():
-    class Item:
-        def __init__(self, start, end):
-            self.start, self.end = start, end
+class _FakeClip:
+    def __init__(self, type_name):
+        self.type_name = type_name
 
-        def GetStart(self):
-            return self.start
+    def GetClipProperty(self, key=None):
+        if key == "Type":
+            return self.type_name
+        return {"Type": self.type_name}
 
-        def GetEnd(self):
-            return self.end
 
-    class Title(Item):
-        def __init__(self, start, end):
-            super().__init__(start, end)
-            self.properties = {}
+class _FakeFolder:
+    def __init__(self, name, clips=(), subs=()):
+        self.name = name
+        self.clips = list(clips)
+        self.subs = list(subs)
 
-        def SetProperty(self, key, value):
-            self.properties[key] = value
-            return True
+    def GetName(self):
+        return self.name
 
-    class Timeline:
-        def __init__(self):
-            self.tracks = {1: [], 2: [Item(10, 20)]}
-            self.added = []
+    def GetClipList(self):
+        return self.clips
 
-        def GetTrackCount(self, _kind):
-            return len(self.tracks)
+    def GetSubFolderList(self):
+        return self.subs
 
-        def GetItemListInTrack(self, _kind, index):
-            return self.tracks[index]
 
-        def GetSetting(self, key):
-            return {"timelineResolutionWidth": "1920", "timelineResolutionHeight": "1080"}.get(key)
+class _FakeTitleItem:
+    def __init__(self, start, end):
+        self.start, self.end = start, end
+        self.properties = {}
 
-        def AddTrack(self, _kind):
-            self.tracks[len(self.tracks) + 1] = []
-            return True
+    def GetStart(self):
+        return self.start
 
-        def AddFusionTitleClip(self, name, track, start, duration):
-            title = Title(start, start + duration)
-            self.tracks[track].append(title)
-            self.added.append((name, track, start, duration))
-            return title
+    def GetEnd(self):
+        return self.end
 
-        def DeleteClips(self, _items, _ripple):
-            return True
+    def SetProperty(self, key, value):
+        self.properties[key] = value
+        return True
 
-        def DeleteTrack(self, _kind, index):
-            self.tracks.pop(index, None)
-            return True
 
+class _FakeCaptionMediaPool:
+    def __init__(self, timeline, root=None, drb_adds_template=False, offset=0):
+        self.timeline = timeline
+        self.root = root or _FakeFolder("Master")
+        self.drb_adds_template = drb_adds_template
+        self.offset = offset
+        self.requests = []
+        self.imported_drbs = []
+
+    def GetRootFolder(self):
+        return self.root
+
+    def SetCurrentFolder(self, _folder):
+        return True
+
+    def ImportFolderFromFile(self, path):
+        self.imported_drbs.append(path)
+        if self.drb_adds_template:
+            self.root.subs.append(
+                _FakeFolder("Captain", clips=[_FakeClip("Fusion Title")])
+            )
+        return True
+
+    def AppendToTimeline(self, infos):
+        info = infos[0]
+        self.requests.append(dict(info))
+        start = info["recordFrame"] + self.offset
+        title = _FakeTitleItem(
+            start, start + (info["endFrame"] - info["startFrame"])
+        )
+        self.timeline.tracks[info["trackIndex"]].append(title)
+        return [title]
+
+
+class _FakeCaptionTimeline:
+    def __init__(self, tracks):
+        self.tracks = tracks
+        self.deleted = []
+
+    def GetTrackCount(self, _kind):
+        return len(self.tracks)
+
+    def GetItemListInTrack(self, _kind, index):
+        return self.tracks[index]
+
+    def GetSetting(self, key):
+        return {"timelineResolutionWidth": "1920", "timelineResolutionHeight": "1080"}.get(key)
+
+    def AddTrack(self, _kind):
+        self.tracks[len(self.tracks) + 1] = []
+        return True
+
+    def DeleteClips(self, items, _ripple):
+        self.deleted.extend(items)
+        return True
+
+    def DeleteTrack(self, _kind, index):
+        self.tracks.pop(index, None)
+        return True
+
+
+def _caption_handler(timeline, media_pool):
     class Project:
-        def __init__(self, timeline):
-            self.timeline = timeline
-
-        def GetCurrentTimeline(self):
-            return self.timeline
-
-    class ProjectManager:
-        def __init__(self, project):
-            self.project = project
-
-        def GetCurrentProject(self):
-            return self.project
-
-    timeline = Timeline()
-    handler = ResolveHandler()
-    handler.resolve = type("Resolve", (), {"GetProjectManager": lambda _self: ProjectManager(Project(timeline))})()
-    clip = ClipInfo(
-        clip_id="video:1:0:0", name="Talk", track_type="video", track_index=1,
-        timeline_start_frame=0, timeline_end_frame=100,
-        source_start_frame=0, source_end_frame=100, file_path="/tmp/talk.mov", fps=24,
-    )
-    handler._clips[clip.clip_id] = clip
-
-    count = handler.create_captions(
-        clip,
-        [{"text": "Hello", "start_frame": 10, "end_frame": 20, "write_on_end_frame": 10}],
-        {"write_on": False, "position_x": 0.6, "scale_x": 1.5, "anchor_y": 0.4},
-    )
-    assert count == 1
-    assert timeline.added == [("Text+", 3, 10, 10)]
-    assert len(timeline.tracks[2]) == 1
-    title = timeline.tracks[3][0]
-    assert title.properties["PositionX"] == pytest.approx(0.6)
-    assert title.properties["FontSize"] == pytest.approx(96 / 1920)
-    assert title.properties["ZoomX"] == pytest.approx(1.5)
-    assert title.properties["AnchorPointY"] == pytest.approx(108.0)
-
-
-def test_caption_generation_places_textplus_when_exact_title_api_is_missing():
-    class Item:
-        def __init__(self, start, end, source_start=0, source_end=0):
-            self.start, self.end = start, end
-            self.source_start = source_start
-            self.source_end = source_end
-            self.properties = {}
-            self.media_pool_item = object()
-
-        def GetStart(self):
-            return self.start
-
-        def GetEnd(self):
-            return self.end
-
-        def GetSourceStartFrame(self):
-            return self.source_start
-
-        def GetSourceEndFrame(self):
-            return self.source_end
-
-        def GetMediaPoolItem(self):
-            return None
-
-        def GetFusionCompCount(self):
-            return 1
-
-        def ExportFusionComp(self, path, _index):
-            Path(path).write_text("comp", encoding="utf-8")
-            return True
-
-        def ImportFusionComp(self, _path):
-            self.imported_comp = True
-            return object()
-
-        def SetProperty(self, key, value):
-            self.properties[key] = value
-            return True
-
-    class Timeline:
-        def __init__(self):
-            self.tracks = {1: []}
-            self.inserted = []
-            self.deleted = []
-
-        def GetTrackCount(self, _kind):
-            return len(self.tracks)
-
-        def GetItemListInTrack(self, _kind, index):
-            return self.tracks[index]
-
-        def GetSetting(self, key):
-            return {"timelineResolutionWidth": "1920", "timelineResolutionHeight": "1080"}.get(key)
-
-        def AddTrack(self, _kind):
-            self.tracks[len(self.tracks) + 1] = []
-            return True
-
-        def InsertFusionTitleIntoTimeline(self, name):
-            self.inserted.append(name)
-            return Item(0, 120, 0, 1000)
-
-        def SetCurrentTimecode(self, _timecode):
-            return True
-
-        def GetCurrentTimecode(self):
-            return "00:00:00:00"
-
-        def DeleteClips(self, items, _ripple):
-            self.deleted.extend(items)
-            return True
-
-        def DeleteTrack(self, _kind, index):
-            self.tracks.pop(index, None)
-            return True
-
-    class MediaPool:
-        def __init__(self, timeline):
-            self.timeline = timeline
-            self.requests = []
-
-        def AppendToTimeline(self, infos):
-            info = infos[0]
-            self.requests.append(dict(info))
-            title = Item(info["recordFrame"], info["recordFrame"] + (
-                info["endFrame"] - info["startFrame"]
-            ))
-            self.timeline.tracks[info["trackIndex"]].append(title)
-            return [title]
-
-        def ImportMedia(self, paths):
-            self.imported_paths = list(paths)
-            return [object()]
-
-    timeline = Timeline()
-    media_pool = MediaPool(timeline)
-
-    class Project:
-        def __init__(self):
-            self.timeline = timeline
-
         def GetCurrentTimeline(self):
             return timeline
 
@@ -459,11 +373,52 @@ def test_caption_generation_places_textplus_when_exact_title_api_is_missing():
         "Resolve", (), {"GetProjectManager": lambda _self: ProjectManager()}
     )()
     clip = ClipInfo(
-        clip_id="video:1:0:0", name="Compound", track_type="video", track_index=1,
+        clip_id="video:1:0:0", name="Talk", track_type="video", track_index=1,
         timeline_start_frame=0, timeline_end_frame=100,
-        source_start_frame=0, source_end_frame=100, file_path="", fps=24,
+        source_start_frame=0, source_end_frame=100, file_path="/tmp/talk.mov", fps=24,
     )
     handler._clips[clip.clip_id] = clip
+    return handler, clip
+
+
+def _captain_bin_pool(timeline):
+    template = _FakeClip("Fusion Title")
+    root = _FakeFolder("Master", subs=[
+        _FakeFolder("Nested", subs=[_FakeFolder("Captain", clips=[_FakeClip("Video"), template])])
+    ])
+    return _FakeCaptionMediaPool(timeline, root=root), template
+
+
+def test_direct_caption_generation_uses_a_new_top_track_when_occupied():
+    timeline = _FakeCaptionTimeline({1: [], 2: [_FakeTitleItem(10, 20)]})
+    media_pool, template = _captain_bin_pool(timeline)
+    handler, clip = _caption_handler(timeline, media_pool)
+
+    count = handler.create_captions(
+        clip,
+        [{"text": "Hello", "start_frame": 10, "end_frame": 20, "write_on_end_frame": 10}],
+        {"write_on": False, "position_x": 0.6, "scale_x": 1.5, "anchor_y": 0.4},
+    )
+    assert count == 1
+    request = media_pool.requests[0]
+    assert request["trackIndex"] == 3
+    assert request["recordFrame"] == 10
+    assert request["endFrame"] == 10
+    assert request["mediaPoolItem"] is template
+    assert len(timeline.tracks[2]) == 1
+    title = timeline.tracks[3][0]
+    assert title.properties["PositionX"] == pytest.approx(0.6)
+    assert title.properties["FontSize"] == pytest.approx(96 / 1920)
+    assert title.properties["ZoomX"] == pytest.approx(1.5)
+    assert title.properties["AnchorPointY"] == pytest.approx(108.0)
+
+
+def test_caption_generation_appends_textplus_template_from_captain_bin():
+    timeline = _FakeCaptionTimeline({1: []})
+    timeline.InsertFusionTitleIntoTimeline = lambda *_a: pytest.fail("seeded a title")
+    media_pool, template = _captain_bin_pool(timeline)
+    media_pool.ImportMedia = lambda *_a: pytest.fail("imported media")
+    handler, clip = _caption_handler(timeline, media_pool)
 
     count = handler.create_captions(
         clip,
@@ -472,12 +427,84 @@ def test_caption_generation_places_textplus_when_exact_title_api_is_missing():
     )
 
     assert count == 1
-    assert timeline.inserted == ["Text+"]
+    assert media_pool.imported_drbs == []
+    assert media_pool.requests[0]["mediaPoolItem"] is template
     assert media_pool.requests[0]["recordFrame"] == 40
     assert media_pool.requests[0]["trackIndex"] == 1
     assert timeline.tracks[1][0].start == 40
     assert timeline.tracks[1][0].end == 55
-    assert timeline.deleted
+    assert not hasattr(timeline.tracks[1][0], "imported_comp")
+
+
+def test_find_caption_template_accepts_dict_type():
+    handler = ResolveHandler()
+    dict_type = _FakeClip({"Type": "Fusion Title"})
+    dict_type.GetClipProperty = lambda key=None: {"Type": "Fusion Title"}
+    pool = _FakeCaptionMediaPool(None, root=_FakeFolder("Master", subs=[
+        _FakeFolder("Captain", clips=[dict_type])
+    ]))
+    assert handler._find_caption_template(pool) is dict_type
+
+    only_video = _FakeCaptionMediaPool(None, root=_FakeFolder("Master", subs=[
+        _FakeFolder("Captain", clips=[_FakeClip("Video")])
+    ]))
+    assert handler._find_caption_template(only_video) is None
+
+
+def test_caption_template_imported_from_drb_when_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr("captain.api.data_dir", lambda: tmp_path)
+    drb = tmp_path / "caption-template.drb"
+    drb.write_bytes(b"drb")
+    timeline = _FakeCaptionTimeline({1: []})
+    media_pool = _FakeCaptionMediaPool(timeline, drb_adds_template=True)
+    handler, clip = _caption_handler(timeline, media_pool)
+
+    count = handler.create_captions(
+        clip,
+        [{"text": "Hello", "start_frame": 40, "end_frame": 55, "write_on_end_frame": 40}],
+        {"write_on": False},
+    )
+
+    assert count == 1
+    assert media_pool.imported_drbs == [str(drb)]
+    assert len(media_pool.requests) == 1
+
+
+def test_caption_generation_errors_without_template(monkeypatch, tmp_path):
+    from captain.api import NO_CAPTION_TEMPLATE_MSG
+
+    monkeypatch.setattr("captain.api.data_dir", lambda: tmp_path)
+    timeline = _FakeCaptionTimeline({1: [_FakeTitleItem(0, 100)]})
+    media_pool = _FakeCaptionMediaPool(timeline)
+    handler, clip = _caption_handler(timeline, media_pool)
+
+    with pytest.raises(ResolveError) as exc:
+        handler.create_captions(
+            clip,
+            [{"text": "Hello", "start_frame": 40, "end_frame": 55, "write_on_end_frame": 40}],
+            {"write_on": False},
+        )
+
+    assert str(exc.value) == NO_CAPTION_TEMPLATE_MSG
+    assert 2 not in timeline.tracks
+    assert media_pool.requests == []
+
+
+def test_caption_generation_rejects_misplaced_title():
+    timeline = _FakeCaptionTimeline({1: []})
+    media_pool, _template = _captain_bin_pool(timeline)
+    media_pool.offset = 5
+    handler, clip = _caption_handler(timeline, media_pool)
+
+    with pytest.raises(ResolveError):
+        handler.create_captions(
+            clip,
+            [{"text": "Hello", "start_frame": 40, "end_frame": 55, "write_on_end_frame": 40}],
+            {"write_on": False},
+        )
+
+    assert len(timeline.deleted) == 1
+    assert timeline.deleted[0].start == 45
 
 
 def test_capture_current_frame_resolves_resolve_exported_filename(tmp_path):

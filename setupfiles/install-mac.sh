@@ -41,6 +41,7 @@ echo
 echo "Registering Captain with DaVinci Resolve (Workspace → Scripts → Captain)..."
 mkdir -p "$USER_SCRIPTS"
 cp "$APP_DIR/scripts/Captain.lua" "$USER_SCRIPTS/Captain.lua"
+if [ -f "$APP_DIR/scripts/caption-template.drb" ]; then mkdir -p "$DATA_DIR"; cp "$APP_DIR/scripts/caption-template.drb" "$DATA_DIR/caption-template.drb"; fi
 
 # One menu entry only — remove legacy probes / duplicates.
 rm -f "$USER_SCRIPTS/HelloCaptain.lua" \
