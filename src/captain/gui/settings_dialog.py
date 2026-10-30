@@ -6,6 +6,7 @@ from typing import Any
 
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -14,6 +15,8 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QVBoxLayout,
 )
+
+from ..config import WHISPER_MODELS
 
 
 class SettingsDialog(QDialog):
@@ -26,6 +29,18 @@ class SettingsDialog(QDialog):
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
+
+        self.model_combo = QComboBox()
+        self.model_combo.addItems(WHISPER_MODELS)
+        current_model = str(cfg.get("whisper_model", "large-v3-turbo"))
+        if self.model_combo.findText(current_model) < 0:
+            self.model_combo.addItem(current_model)
+        self.model_combo.setCurrentText(current_model)
+        self.model_combo.setToolTip(
+            "Used for new transcriptions. Larger models are more accurate but "
+            "slower and download once (large-v3-turbo \u2248 1.6 GB)."
+        )
+        self._initial_model = current_model
 
         self.font_combo = QFontComboBox()
         family = str(cfg.get("transcript_font_family") or "").strip()
@@ -69,6 +84,7 @@ class SettingsDialog(QDialog):
         self.keep_before_spin.setValue(float(cfg.get("silence_keep_before", 0.03)))
         self.keep_before_spin.setToolTip("Silence kept before each word when trimming.")
 
+        form.addRow("Whisper model", self.model_combo)
         form.addRow("Font", self.font_combo)
         form.addRow("Size", self.size_spin)
         form.addRow("Word spacing", self.spacing_spin)
@@ -86,7 +102,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(buttons)
 
     def values(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "transcript_font_family": self.font_combo.currentFont().family(),
             "transcript_font_size": self.size_spin.value(),
             "transcript_word_spacing": self.spacing_spin.value(),
@@ -95,3 +111,8 @@ class SettingsDialog(QDialog):
             "silence_keep_after": self.keep_after_spin.value(),
             "silence_keep_before": self.keep_before_spin.value(),
         }
+        model = self.model_combo.currentText()
+        if model != self._initial_model:
+            out["whisper_model"] = model
+            out["whisper_model_chosen"] = True
+        return out

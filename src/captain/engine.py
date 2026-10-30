@@ -111,9 +111,17 @@ def probe_duration(media_path: str) -> float:
     return float(result.stdout.strip())
 
 
+_MODEL_REPOS: dict[str, str] = {
+    "large-v3-turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+    "turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+}
+
+
 def _repo_for_model(model_name: str) -> str:
     if "/" in model_name:
         return model_name
+    if model_name in _MODEL_REPOS:
+        return _MODEL_REPOS[model_name]
     return f"Systran/faster-whisper-{model_name}"
 
 
@@ -224,7 +232,7 @@ class Transcriber:
 
     def __init__(
         self,
-        model_name: str = "small",
+        model_name: str = "large-v3-turbo",
         device: str = "auto",
         compute_type: str = "int8",
         models_dir: str | None = None,

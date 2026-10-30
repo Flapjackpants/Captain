@@ -622,8 +622,16 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self.cfg, self)
         if dlg.exec() != dlg.DialogCode.Accepted:
             return
+        old_model = self.cfg["whisper_model"]
         self.cfg.update(dlg.values())
         config.save_config(self.cfg)
+        if self.cfg["whisper_model"] != old_model:
+            self.transcriber = Transcriber(
+                model_name=self.cfg["whisper_model"],
+                device=self.cfg["whisper_device"],
+                compute_type=self.cfg["whisper_compute_type"],
+                models_dir=str(config.models_dir()),
+            )
         self._apply_typography_from_cfg()
         self.view.set_silence_thresholds(
             SILENCE_DISPLAY_MIN,

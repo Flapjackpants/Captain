@@ -12,7 +12,8 @@ from typing import Any
 APP_NAME = "Captain"
 
 DEFAULTS: dict[str, Any] = {
-    "whisper_model": "small",
+    "whisper_model": "large-v3-turbo",
+    "whisper_model_chosen": False,  # True once the user picks a model in Settings
     "whisper_device": "auto",
     "whisper_compute_type": "int8",
     "language": None,  # autodetect
@@ -35,6 +36,7 @@ DEFAULTS: dict[str, Any] = {
 }
 
 APPLY_MODES = frozenset({"replace_in_place", "replace_ripple", "new_timeline"})
+WHISPER_MODELS: tuple[str, ...] = ("small", "medium", "large-v3-turbo", "large-v3")
 
 
 def normalize_apply_mode(mode: Any) -> str:
@@ -78,6 +80,8 @@ def load_config() -> dict[str, Any]:
         cfg.update(json.loads(_config_path().read_text()))
     except (OSError, ValueError):
         pass
+    if cfg.get("whisper_model") == "small" and not cfg.get("whisper_model_chosen"):
+        cfg["whisper_model"] = DEFAULTS["whisper_model"]
     cfg["apply_mode"] = normalize_apply_mode(cfg.get("apply_mode"))
     return cfg
 
