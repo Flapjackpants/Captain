@@ -464,6 +464,110 @@ def test_caption_breaks_roundtrip_clean_and_undo_snapshot():
     assert tr.caption_breaks == {1}
 
 
+def _seg_words(segs, gap=0.0):
+    words = []
+    t = 0.0
+    for i, seg in enumerate(segs):
+        words.append(Word(index=i, text=f"w{i}", start=t, end=t + 0.2, segment_id=seg))
+        t += 0.2 + gap
+    return words
+
+
+def test_join_line_merges_whisper_segment_line():
+    tr = Transcript(words=_seg_words([1, 1, 2, 2]), duration=2.0)
+    assert [l.word_indices for l in tr.lines()] == [(0, 1), (2, 3)]
+    assert tr.join_line_at(2)
+    assert [l.word_indices for l in tr.lines()] == [(0, 1, 2, 3)]
+    assert 2 in tr.caption_joins
+
+
+def test_join_line_merges_pause_line():
+    words = [
+        Word(index=0, text="a", start=0.0, end=0.2),
+        Word(index=1, text="b", start=0.25, end=0.4),
+        Word(index=2, text="c", start=2.0, end=2.2),
+    ]
+    tr = Transcript(words=words, duration=3.0)
+    assert len(tr.lines()) == 2
+    assert tr.join_line_at(2)
+    assert [l.word_indices for l in tr.lines()] == [(0, 1, 2)]
+
+
+def test_add_break_after_join_restores_auto_line():
+    tr = Transcript(words=_seg_words([1, 1, 2, 2]), duration=2.0)
+    assert tr.join_line_at(2)
+    assert tr.add_caption_break(2)
+    assert [l.word_indices for l in tr.lines()] == [(0, 1), (2, 3)]
+    assert tr.caption_joins == set()
+    assert tr.caption_breaks == set()
+
+
+def test_join_line_rejects_first_word_and_non_starts():
+    tr = Transcript(words=_seg_words([1, 1, 2, 2]), duration=2.0)
+    assert not tr.join_line_at(0)
+    assert not tr.join_line_at(99)
+    assert not tr.join_line_at(1)
+    assert tr.caption_joins == set()
+    assert tr.caption_breaks == set()
+
+
+def test_line_starts_excludes_first_line():
+    tr = Transcript(words=_seg_words([1, 1, 2, 2]), duration=2.0)
+    assert tr.line_starts() == {2}
+    assert tr.add_caption_break(1)
+    assert tr.line_starts() == {1, 2}
+
+
+def test_move_line_first_word_keeps_break_in_place():
+    tr = Transcript(words=_seg_words([1, 1, 2, 2, 2]), duration=2.0)
+    tr.move([2], 0)
+    assert tr.order == [2, 0, 1, 3, 4]
+    assert 3 in tr.line_starts()
+    assert 2 not in tr.line_starts()
+    assert 0 not in tr.line_starts()
+    assert [l.word_indices for l in tr.lines()] == [(2, 0, 1), (3, 4)]
+
+
+def test_move_run_keeps_internal_line_start():
+    tr = Transcript(words=_seg_words([1, 1, 2, 2, 3, 3]), duration=2.0)
+    tr.move([1, 2], 4)
+    assert tr.order == [0, 3, 4, 5, 1, 2]
+    assert 2 in tr.line_starts()
+    assert 4 in tr.line_starts()
+    assert [l.word_indices for l in tr.lines()] == [(0, 3), (4, 5, 1), (2,)]
+
+
+def test_move_into_line_does_not_split_it():
+    tr = Transcript(words=_seg_words([1, 1, 1, 2, 2]), duration=2.0)
+    tr.move([3], 1)
+    assert tr.order == [0, 3, 1, 2, 4]
+    assert tr.line_starts() == {4}
+    assert [l.word_indices for l in tr.lines()] == [(0, 3, 1, 2), (4,)]
+
+
+def test_caption_joins_roundtrip_clean_and_undo_snapshot():
+    from captain.transcript import apply_snapshot, snapshot_transcript
+
+    tr = Transcript(words=_seg_words([1, 1, 2, 2]), duration=2.0)
+    assert tr.join_line_at(2)
+    saved = Transcript.from_json(tr.to_json())
+    assert saved.caption_joins == {2}
+    legacy = Transcript.from_json('{"words": [], "duration": 0}')
+    assert legacy.caption_joins == set()
+    clean = Transcript.from_json(tr.to_json(clean=True))
+    assert clean.caption_joins == set()
+
+    snapshot = snapshot_transcript(tr)
+    assert snapshot.caption_joins == frozenset({2})
+    tr.add_caption_break(2)
+    assert tr.caption_joins == set()
+    apply_snapshot(tr, snapshot)
+    assert tr.caption_joins == {2}
+
+    tr.reset_edits()
+    assert tr.caption_joins == set()
+
+
 def test_lines_by_pause_when_no_segments():
     # All segment_id=0 and large gap → two lines via pause grouping
     words = [

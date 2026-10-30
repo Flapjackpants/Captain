@@ -42,6 +42,15 @@ class TranscriptLine:
     word_indices: tuple[int, ...] = ()
 
 
+def _natural_line_start(
+    prev: Word, word: Word, has_segments: bool, pause_gap: float
+) -> bool:
+    """True when the segment/pause rule alone starts a new line at `word`."""
+    if has_segments:
+        return word.segment_id != prev.segment_id
+    return word.start - prev.end >= pause_gap
+
+
 @dataclass
 class Transcript:
     words: list[Word]
@@ -54,12 +63,17 @@ class Transcript:
     # Word indices at which the user inserted a manual caption break.
     # Breaks are anchored to words so they remain associated through reorders.
     caption_breaks: set[int] = field(default_factory=set)
+    # Word indices whose automatic line start the user merged away.
+    caption_joins: set[int] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         if not self.order:
             self.order = [w.index for w in self.words]
         self.caption_breaks = {
             int(i) for i in self.caption_breaks if 0 <= int(i) < len(self.words)
+        }
+        self.caption_joins = {
+            int(i) for i in self.caption_joins if 0 <= int(i) < len(self.words)
         }
 
     # ---- edit ops -------------------------------------------------------
@@ -73,33 +87,94 @@ class Transcript:
     def move(self, indices: list[int], dest_pos: int) -> None:
         """Cut `indices` (in current order) and paste before order position
         `dest_pos`, where dest_pos indexes the order list *after* removal."""
-        moving = [i for i in self.order if i in set(indices)]
-        rest = [i for i in self.order if i not in set(indices)]
+        old_order = list(self.order)
+        old_starts = self.line_starts()
+        moved = set(indices)
+        desired: set[int] = set()
+        for k, w in enumerate(old_order):
+            if w not in old_starts:
+                continue
+            if w not in moved:
+                desired.add(w)
+            elif k > 0 and old_order[k - 1] in moved:
+                desired.add(w)  # internal to a moved run
+            else:
+                for nxt in old_order[k + 1 :]:
+                    if nxt not in moved:
+                        desired.add(nxt)
+                        break
+
+        moving = [i for i in self.order if i in moved]
+        rest = [i for i in self.order if i not in moved]
         dest_pos = max(0, min(dest_pos, len(rest)))
         self.order = rest[:dest_pos] + moving + rest[dest_pos:]
+
+        has_segments = any(w.segment_id for w in self.words)
+        if self.order:
+            self.caption_breaks.discard(self.order[0])
+            self.caption_joins.discard(self.order[0])
+        for pos in range(1, len(self.order)):
+            w = self.order[pos]
+            self.caption_breaks.discard(w)
+            self.caption_joins.discard(w)
+            natural = _natural_line_start(
+                self.words[self.order[pos - 1]],
+                self.words[w],
+                has_segments,
+                PAUSE_LINE_GAP,
+            )
+            if w in desired and not natural:
+                self.caption_breaks.add(w)
+            elif w not in desired and natural:
+                self.caption_joins.add(w)
 
     def is_reordered(self) -> bool:
         return self.order != sorted(self.order)
 
-    def add_caption_break(self, before_word: int) -> bool:
-        """Add a manual caption boundary before ``before_word``.
+    def line_starts(self) -> set[int]:
+        """Start word of every line except the first."""
+        return {line.start_word for line in self.lines()[1:]}
 
-        Returns False if the word is invalid or already begins a transcript
-        line (including an existing manual boundary).
+    def set_line_start(self, word: int, start: bool) -> bool:
+        """Make ``word`` begin (or stop beginning) a line.
+
+        Returns False if the word is not in the order, is the first word, or
+        is already in the requested state.
         """
-        if before_word not in self.order or before_word in self.caption_breaks:
+        if word not in self.order or word == self.order[0]:
             return False
-        if any(line.start_word == before_word for line in self.lines()):
+        pos = self.order.index(word)
+        has_segments = any(w.segment_id for w in self.words)
+        natural = _natural_line_start(
+            self.words[self.order[pos - 1]],
+            self.words[word],
+            has_segments,
+            PAUSE_LINE_GAP,
+        )
+        current = word in self.caption_breaks or (
+            natural and word not in self.caption_joins
+        )
+        if current == start:
             return False
-        self.caption_breaks.add(before_word)
+        self.caption_breaks.discard(word)
+        self.caption_joins.discard(word)
+        if start and not natural:
+            self.caption_breaks.add(word)
+        elif not start and natural:
+            self.caption_joins.add(word)
         return True
+
+    def join_line_at(self, word: int) -> bool:
+        """Merge the line starting at ``word`` into the previous line."""
+        return self.set_line_start(word, False)
+
+    def add_caption_break(self, before_word: int) -> bool:
+        """Start a line at before_word (manual break or un-merge)."""
+        return self.set_line_start(before_word, True)
 
     def remove_caption_break(self, before_word: int) -> bool:
-        """Remove a user-created boundary; automatic Whisper lines remain."""
-        if before_word not in self.caption_breaks:
-            return False
-        self.caption_breaks.remove(before_word)
-        return True
+        """Merge the line starting at before_word into the previous line."""
+        return self.join_line_at(before_word)
 
     # ---- lines / search -------------------------------------------------
 
@@ -118,12 +193,13 @@ class Transcript:
             elif widx in self.caption_breaks:
                 groups.append(current)
                 current = [widx]
-            elif has_segments and word.segment_id == prev.segment_id:  # type: ignore[union-attr]
+            elif widx in self.caption_joins:
                 current.append(widx)
-            elif (
-                not has_segments
-                and prev is not None
-                and word.start - prev.end < pause_gap
+            elif not _natural_line_start(
+                prev,  # type: ignore[arg-type]
+                word,
+                has_segments,
+                pause_gap,
             ):
                 current.append(widx)
             else:
@@ -220,6 +296,7 @@ class Transcript:
         self.removed = set()
         self.silence_cuts = []
         self.caption_breaks = set()
+        self.caption_joins = set()
 
     def to_json(self, *, clean: bool = False) -> str:
         """Serialize the transcript.
@@ -232,11 +309,13 @@ class Transcript:
             removed: list[int] = []
             silence_cuts: list[tuple[float, float]] = []
             caption_breaks: list[int] = []
+            caption_joins: list[int] = []
         else:
             order = self.order
             removed = sorted(self.removed)
             silence_cuts = self.silence_cuts
             caption_breaks = sorted(self.caption_breaks)
+            caption_joins = sorted(self.caption_joins)
         return json.dumps(
             {
                 "source_path": self.source_path,
@@ -255,6 +334,7 @@ class Transcript:
                 "silence_cuts": silence_cuts,
                 "script_text": self.script_text,
                 "caption_breaks": caption_breaks,
+                "caption_joins": caption_joins,
             },
             indent=2,
         )
@@ -281,6 +361,7 @@ class Transcript:
             silence_cuts=[tuple(c) for c in d.get("silence_cuts", [])],
             script_text=d.get("script_text", "") or "",
             caption_breaks=set(d.get("caption_breaks", [])),
+            caption_joins=set(d.get("caption_joins", [])),
         )
 
     def save(self, path: Path, *, clean: bool = False) -> None:
@@ -493,6 +574,7 @@ class EditSnapshot:
     removed: frozenset[int]
     silence_cuts: tuple[tuple[float, float], ...]
     caption_breaks: frozenset[int] = frozenset()
+    caption_joins: frozenset[int] = frozenset()
 
 
 class EditHistory:
@@ -538,6 +620,7 @@ def snapshot_transcript(transcript: Transcript) -> EditSnapshot:
         removed=frozenset(transcript.removed),
         silence_cuts=tuple(tuple(c) for c in transcript.silence_cuts),
         caption_breaks=frozenset(transcript.caption_breaks),
+        caption_joins=frozenset(transcript.caption_joins),
     )
 
 
@@ -546,6 +629,7 @@ def apply_snapshot(transcript: Transcript, snap: EditSnapshot) -> None:
     transcript.removed = set(snap.removed)
     transcript.silence_cuts = [tuple(c) for c in snap.silence_cuts]
     transcript.caption_breaks = set(snap.caption_breaks)
+    transcript.caption_joins = set(snap.caption_joins)
 
 
 def media_sec_to_timeline_frame(
