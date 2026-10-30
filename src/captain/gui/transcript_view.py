@@ -14,6 +14,8 @@ from PySide6.QtCore import (
     QAbstractListModel,
     QItemSelection,
     QModelIndex,
+    QPoint,
+    QRect,
     QSize,
     Qt,
     Signal,
@@ -438,6 +440,8 @@ class TranscriptView(QListView):
         self._drag_selecting = False
         self._press_row: int | None = None
         self._suppress_clicked = False
+        self._caret = 0
+        self._caret_anchor: int | None = None
 
     def apply_typography(
         self,
@@ -468,6 +472,8 @@ class TranscriptView(QListView):
     def set_transcript(self, transcript: Transcript | None) -> None:
         self._history.clear()
         self._model.set_transcript(transcript)
+        self._caret = 0
+        self._caret_anchor = None
 
     def set_silence_thresholds(self, min_duration: float, max_pause: float) -> None:
         self._model.set_silence_thresholds(min_duration, max_pause)
@@ -477,6 +483,7 @@ class TranscriptView(QListView):
 
     def refresh(self) -> None:
         self._model.refresh()
+        self.set_caret(self._caret, scroll=False)
 
     def set_search_matches(self, word_indices: list[int]) -> None:
         self._model.set_matches(word_indices)
@@ -502,8 +509,17 @@ class TranscriptView(QListView):
         )
         sm.setCurrentIndex(index, sm.SelectionFlag.NoUpdate)
         self._select_anchor = row
+        self._sync_caret_to_word(word_index)
         if scroll:
             self.scrollTo(index, QListView.ScrollHint.PositionAtCenter)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        rect = self._caret_rect()
+        if rect is not None:
+            painter = QPainter(self.viewport())
+            painter.fillRect(rect, self.palette().text().color())
+            painter.end()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -630,6 +646,9 @@ class TranscriptView(QListView):
             sm.setCurrentIndex(index, sm.SelectionFlag.NoUpdate)
             self._drag_selecting = True
 
+        self._caret = self._caret_for_point(pos, row)
+        self._caret_anchor = None
+        self.viewport().update()
         self.setFocus(Qt.FocusReason.MouseFocusReason)
         event.accept()
 
@@ -708,6 +727,7 @@ class TranscriptView(QListView):
             return False
         apply_snapshot(self.transcript, snap)
         self._model.set_transcript(self.transcript)
+        self.set_caret(self._caret, scroll=False)
         self.edited.emit()
         return True
 
@@ -720,6 +740,7 @@ class TranscriptView(QListView):
             return False
         apply_snapshot(self.transcript, snap)
         self._model.set_transcript(self.transcript)
+        self.set_caret(self._caret, scroll=False)
         self.edited.emit()
         return True
 
@@ -820,6 +841,22 @@ class TranscriptView(QListView):
             self.insert_caption_break()
             event.accept()
             return
+        elif event.key() in (
+            Qt.Key.Key_Left,
+            Qt.Key.Key_Right,
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
+            Qt.Key.Key_Home,
+            Qt.Key.Key_End,
+        ) and not (
+            event.modifiers()
+            & ~(Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.KeypadModifier)
+        ):
+            self._move_caret(
+                event.key(), bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            )
+            event.accept()
+            return
         elif event.matches(QKeySequence.StandardKey.Cut):
             self.cut_selection()
         elif event.matches(QKeySequence.StandardKey.Paste):
@@ -842,7 +879,158 @@ class TranscriptView(QListView):
         selection.clearSelection()
         selection.setCurrentIndex(index, selection.SelectionFlag.NoUpdate)
         self._select_anchor = row
+        self._sync_caret_to_word(word_index)
         self.scrollTo(index, QListView.ScrollHint.PositionAtCenter)
+
+    def _sync_caret_to_word(self, word_index: int) -> None:
+        tr = self.transcript
+        if tr is not None and word_index in tr.order:
+            self._caret = tr.order.index(word_index)
+            self._caret_anchor = None
+        self.viewport().update()
+
+    def caret_position(self) -> int:
+        """Caret slot in transcript.order: 0..len(order)."""
+        return self._caret
+
+    def set_caret(self, pos: int, *, scroll: bool = True) -> None:
+        tr = self.transcript
+        n = len(tr.order) if tr is not None else 0
+        self._caret = max(0, min(int(pos), n))
+        if tr is not None and n:
+            word = tr.order[min(self._caret, n - 1)]
+            row = self._model.row_for_word(word)
+            if row >= 0:
+                index = self._model.index(row)
+                sm = self.selectionModel()
+                sm.setCurrentIndex(index, sm.SelectionFlag.NoUpdate)
+                if scroll:
+                    self.scrollTo(index)
+        self.viewport().update()
+
+    def _caret_rect(self, force: bool = False) -> QRect | None:
+        tr = self.transcript
+        if tr is None or not tr.order:
+            return None
+        if not force and len(self._selected_word_indices()) > 1:
+            return None
+        n = len(tr.order)
+        pos = max(0, min(self._caret, n))
+        word = tr.order[pos] if pos < n else tr.order[-1]
+        row = self._model.row_for_word(word)
+        if row < 0:
+            return None
+        word_rect = self.visualRect(self._model.index(row))
+        x = word_rect.left() if pos < n else word_rect.right() + 1
+        return QRect(x - 1, word_rect.top(), 2, word_rect.height())
+
+    def _caret_for_point(self, pos: QPoint, row: int) -> int:
+        tr = self.transcript
+        if tr is None or not tr.order:
+            return 0
+        n = len(tr.order)
+        kind = self._model.data(self._model.index(row), KIND_ROLE)
+        if kind == "word":
+            widx = self._model.word_index(row)
+            if widx is None or widx not in tr.order:
+                return n
+            rect = self.visualRect(self._model.index(row))
+            return tr.order.index(widx) + (1 if pos.x() > rect.center().x() else 0)
+        if kind == "line":
+            widx = self._model.word_index(row)
+            if widx is not None and widx in tr.order:
+                return tr.order.index(widx)
+            return n
+        for r in range(row + 1, self._model.rowCount()):
+            if self._model.data(self._model.index(r), KIND_ROLE) == "word":
+                widx = self._model.word_index(r)
+                if widx is not None and widx in tr.order:
+                    return tr.order.index(widx)
+        return n
+
+    def _caret_line(self) -> TranscriptLine | None:
+        tr = self.transcript
+        if tr is None or not tr.order:
+            return None
+        n = len(tr.order)
+        target = tr.order[self._caret] if self._caret < n else tr.order[-1]
+        lines = tr.lines()
+        for line in lines:
+            if target in line.word_indices:
+                return line
+        return lines[-1] if lines else None
+
+    def _vertical_caret_target(self, key: int) -> int:
+        tr = self.transcript
+        assert tr is not None
+        n = len(tr.order)
+        up = key == Qt.Key.Key_Up
+        caret = self._caret_rect(force=True)
+        if caret is None:
+            return 0 if up else n
+        pos_of = {w: i for i, w in enumerate(tr.order)}
+        rows: list[tuple[int, int, int, int]] = []  # top, left, right, pos
+        for r in range(self._model.rowCount()):
+            if self._model.data(self._model.index(r), KIND_ROLE) != "word":
+                continue
+            widx = self._model.word_index(r)
+            if widx is None or widx not in pos_of:
+                continue
+            rect = self.visualRect(self._model.index(r))
+            rows.append((rect.top(), rect.left(), rect.right(), pos_of[widx]))
+        tops = [t for t, *_ in rows if (t < caret.top() if up else t > caret.top())]
+        if not tops:
+            return 0 if up else n
+        target_top = max(tops) if up else min(tops)
+        caret_x = caret.left() + 1
+        candidates: list[tuple[int, int]] = []  # x, pos
+        for top, left, right, pos in rows:
+            if top != target_top:
+                continue
+            candidates.append((left, pos))
+            if pos == n - 1:
+                candidates.append((right + 1, pos + 1))
+        return min(candidates, key=lambda c: abs(c[0] - caret_x))[1]
+
+    def _move_caret(self, key: int, shift: bool) -> None:
+        tr = self.transcript
+        if tr is None or not tr.order:
+            return
+        n = len(tr.order)
+        old = self._caret
+        if key == Qt.Key.Key_Left:
+            new = old - 1
+        elif key == Qt.Key.Key_Right:
+            new = old + 1
+        elif key in (Qt.Key.Key_Home, Qt.Key.Key_End):
+            line = self._caret_line()
+            if line is None:
+                return
+            if key == Qt.Key.Key_Home:
+                new = tr.order.index(line.start_word)
+            else:
+                new = tr.order.index(line.end_word) + 1
+        else:
+            new = self._vertical_caret_target(key)
+        new = max(0, min(new, n))
+
+        sm = self.selectionModel()
+        if shift:
+            if self._caret_anchor is None:
+                self._caret_anchor = old
+            lo, hi = sorted((self._caret_anchor, new))
+            if lo == hi:
+                sm.clearSelection()
+            else:
+                self._select_row_range(
+                    self._model.row_for_word(tr.order[lo]),
+                    self._model.row_for_word(tr.order[hi - 1]),
+                    clear=True,
+                )
+        else:
+            self._caret_anchor = None
+            sm.clearSelection()
+        self.set_caret(new)
 
     def insert_caption_break(self) -> bool:
         """Insert a persistent boundary before the selection/current word."""

@@ -338,3 +338,127 @@ def test_mouse_drag_backward_and_margins(qapp):
     # Dragged from 2 forward into margin of that line: words 2 and 3 should be selected
     assert 2 in view._selected_word_indices()
     assert 3 in view._selected_word_indices()
+
+
+def _key(view, qapp, key, mods=Qt.KeyboardModifier.NoModifier):
+    qapp.sendEvent(view, QKeyEvent(QEvent.Type.KeyPress, key, mods))
+
+
+def _click_at(view, qapp, point):
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    for etype, btn, btns in (
+        (QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton),
+        (QEvent.Type.MouseButtonRelease, Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton),
+    ):
+        qapp.sendEvent(
+            view.viewport(),
+            QMouseEvent(
+                etype, QPointF(point), QPointF(point), btn, btns,
+                Qt.KeyboardModifier.NoModifier,
+            ),
+        )
+
+
+def _shown_view(texts, qapp, *, gap=0.1, width=400):
+    view = _view_with_words(texts, qapp=qapp, gap=gap)
+    view.resize(width, 300)
+    view.show()
+    qapp.processEvents()
+    return view
+
+
+def test_caret_click_left_and_right_half(qapp):
+    from PySide6.QtCore import QPoint
+
+    view = _shown_view(["alpha", "bravo", "charlie", "delta"], qapp)
+    rect = view.visualRect(view._model.index(view._model.row_for_word(1)))
+    _click_at(view, qapp, QPoint(rect.left() + 2, rect.center().y()))
+    assert view.caret_position() == 1
+    assert view._selected_word_indices() == [1]
+    _click_at(view, qapp, QPoint(rect.right() - 2, rect.center().y()))
+    assert view.caret_position() == 2
+    assert view._selected_word_indices() == [1]
+
+
+def test_caret_arrows_skip_silence_and_headers(qapp):
+    view = _shown_view(["a", "b", "c", "d", "e"], qapp, gap=1.0)
+    n = len(view.transcript.order)
+    view.set_caret(0)
+    for expected in range(1, n + 1):
+        _key(view, qapp, Qt.Key.Key_Right)
+        assert view.caret_position() == expected
+    _key(view, qapp, Qt.Key.Key_Right)
+    assert view.caret_position() == n
+    view.set_caret(0)
+    _key(view, qapp, Qt.Key.Key_Left)
+    assert view.caret_position() == 0
+
+
+def test_caret_home_end_follow_transcript_line(qapp):
+    view = _shown_view(["a", "b", "c", "d", "e", "f"], qapp)
+    tr = view.transcript
+    assert tr.add_caption_break(3)
+    view.refresh()
+    second = tr.lines()[1]
+    view.set_caret(4)
+    _key(view, qapp, Qt.Key.Key_Home)
+    assert view.caret_position() == tr.order.index(second.start_word)
+    view.set_caret(4)
+    _key(view, qapp, Qt.Key.Key_End)
+    assert view.caret_position() == tr.order.index(second.end_word) + 1
+
+
+def test_caret_up_down_moves_between_visual_rows(qapp):
+    texts = ["one", "two", "three", "four", "five", "six", "seven", "eight"]
+    view = _shown_view(texts, qapp, width=120)
+    view.set_caret(0)
+    top0 = view._caret_rect(force=True).top()
+    _key(view, qapp, Qt.Key.Key_Down)
+    down = view.caret_position()
+    assert down > 0
+    assert view._caret_rect(force=True).top() > top0
+    _key(view, qapp, Qt.Key.Key_Up)
+    assert view._caret_rect(force=True).top() == top0
+    assert view.caret_position() <= down
+
+
+def test_shift_arrow_extends_selection(qapp):
+    view = _shown_view(["a", "b", "c", "d", "e"], qapp)
+    view.set_caret(1)
+    shift = Qt.KeyboardModifier.ShiftModifier
+    _key(view, qapp, Qt.Key.Key_Right, shift)
+    _key(view, qapp, Qt.Key.Key_Right, shift)
+    assert view.caret_position() == 3
+    assert view._selected_word_indices() == [1, 2]
+    _key(view, qapp, Qt.Key.Key_Right)
+    assert view._selected_word_indices() == []
+
+
+def test_select_word_moves_caret(qapp):
+    view = _shown_view(["a", "b", "c", "d"], qapp)
+    view.select_word(2)
+    assert view.caret_position() == 2
+
+
+def test_undo_keeps_caret_in_range(qapp):
+    view = _shown_view(["a", "b", "c", "d"], qapp)
+    n = len(view.transcript.order)
+    view.select_word(1)
+    view.delete_selection()
+    view.set_caret(n)
+    assert view.undo()
+    assert 0 <= view.caret_position() <= n
+    assert view.redo()
+    assert 0 <= view.caret_position() <= n
+
+
+def test_caret_hidden_with_multi_word_selection(qapp):
+    view = _shown_view(["a", "b", "c"], qapp)
+    view.select_word(1)
+    assert view._caret_rect() is not None
+    sm = view.selectionModel()
+    sm.select(view._model.index(view._model.row_for_word(2)), sm.SelectionFlag.Select)
+    assert len(view._selected_word_indices()) == 2
+    assert view._caret_rect() is None
