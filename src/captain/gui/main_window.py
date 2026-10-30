@@ -372,7 +372,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.splitter, stretch=1)
 
         hint = QLabel(
-            "Select words, then: Delete toggles remove/restore • "
+            "Select words, then: Delete removes them (restores if all removed) • "
             "Return splits the line at the caret • "
             "Backspace at a line start (or Delete) merges lines • "
             "←/→/↑/↓ move the caret, Shift selects • "
@@ -381,7 +381,7 @@ class MainWindow(QMainWindow):
             "Cmd/Ctrl+Shift+Z redo • "
             "click a word/timecode/silence jumps the playhead • "
             "silence markers (…) show long gaps; struck = will be trimmed; "
-            "Delete toggles trim vs keep • Trim Silence marks all gaps • "
+            "Delete trims them (keeps if all trimmed) • Trim Silence marks all gaps • "
             "Cmd/Ctrl+F search • Import Script for color compare "
             "(white=match, blue=missing, magenta=extra, red=mismatch, gray=removed)"
         )

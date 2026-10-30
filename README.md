@@ -48,7 +48,8 @@ bash setupfiles/install-mac.sh
 3. Optional: **Import Script…** (`.txt` / `.fountain` / `.srt` / `.vtt`) to
    color-compare against what was said
 
-**Edit:** Delete toggles words remove/restore (and silence trim) · Cmd+X / Cmd+V
+**Edit:** Delete removes selected words and trims silences, or restores them
+if all are already removed · Cmd+X / Cmd+V
 cut-paste · Cmd+Z / Cmd+Shift+Z undo/redo · click jumps the playhead ·
 **Trim Silence** / **Remove Repeats** for auto-trims · silence markers (`…`)
 show long gaps; struck = will be trimmed.

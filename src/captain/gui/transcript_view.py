@@ -793,21 +793,25 @@ class TranscriptView(QListView):
         if not words and not silences:
             return
         self.push_history()
+        # Restore only when everything selected is already removed/trimmed;
+        # otherwise remove/trim it all so mixed selections don't flip.
+        restore = all(w in self.transcript.removed for w in words) and all(
+            trimmed for _, _, trimmed in silences
+        )
         if words:
-            # Toggle each word: removed → restore, active → remove.
-            to_restore = [w for w in words if w in self.transcript.removed]
-            to_remove = [w for w in words if w not in self.transcript.removed]
-            if to_restore:
-                self.transcript.restore(to_restore)
-            if to_remove:
-                self.transcript.delete(to_remove)
+            if restore:
+                self.transcript.restore(words)
+            else:
+                self.transcript.delete(words)
         if silences:
             keep_after = self._model._silence_keep_after
             keep_before = self._model._silence_keep_before
             tr = self.transcript
             cuts = list(self.transcript.silence_cuts)
             for gap_start, gap_end, trimmed in silences:
-                if trimmed:
+                if trimmed and not restore:
+                    continue
+                if restore:
                     # Restore: drop cuts whose midpoint is in this gap.
                     drop = {
                         (round(c[0], 4), round(c[1], 4))

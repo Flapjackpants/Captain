@@ -1,4 +1,4 @@
-"""GUI-level checks for silence markers, timestamp selection, and delete toggle."""
+"""GUI-level checks for silence markers, timestamp selection, and delete."""
 
 from __future__ import annotations
 
@@ -96,27 +96,84 @@ def test_delete_toggles_word_remove_and_restore(qapp):
     assert tr.removed == set()
 
 
-def test_delete_mixed_selection_toggles_each_word(qapp):
+def _select_rows(view: TranscriptView, rows: list[int]) -> None:
+    sm = view.selectionModel()
+    sm.clearSelection()
+    for row in rows:
+        sm.select(view._model.index(row), sm.SelectionFlag.Select)
+
+
+def _silence_rows(view: TranscriptView) -> list[int]:
+    model = view._model
+    return [
+        i
+        for i in range(model.rowCount())
+        if model.data(model.index(i), KIND_ROLE) == "silence"
+    ]
+
+
+def test_delete_mixed_selection_removes_every_word(qapp):
     view = _view_with_words(["a", "b", "c", "d"], qapp=qapp)
     tr = view.transcript
     assert tr is not None
     tr.delete([1, 2])
     view.refresh()
 
-    # Select active word 0 and removed word 1 together.
+    # Active word 0 and removed word 1 together: all become removed.
     model = view._model
-    sm = view.selectionModel()
-    sm.clearSelection()
-    for widx in (0, 1):
-        row = model.row_for_word(widx)
-        sm.select(
-            model.index(row),
-            sm.SelectionFlag.Select,
-        )
-
+    _select_rows(view, [model.row_for_word(0), model.row_for_word(1)])
     view.delete_selection()
-    # 0 was active → removed; 1 was removed → restored.
-    assert tr.removed == {0, 2}
+    assert tr.removed == {0, 1, 2}
+
+
+def test_delete_all_removed_selection_restores_every_word(qapp):
+    view = _view_with_words(["a", "b", "c", "d"], qapp=qapp)
+    tr = view.transcript
+    assert tr is not None
+    tr.delete([1, 2, 3])
+    view.refresh()
+
+    model = view._model
+    _select_rows(view, [model.row_for_word(1), model.row_for_word(2)])
+    view.delete_selection()
+    assert tr.removed == {3}
+
+
+def test_delete_mixed_silences_trims_every_gap(qapp):
+    view = _view_with_words(["a", "b", "c"], qapp=qapp, gap=0.5)
+    tr = view.transcript
+    assert tr is not None
+    rows = _silence_rows(view)
+    assert len(rows) >= 2
+
+    # Trim the first gap, then select both: both end up trimmed.
+    _select_rows(view, [rows[0]])
+    view.delete_selection()
+    assert len(tr.silence_cuts) == 1
+    _select_rows(view, rows[:2])
+    view.delete_selection()
+    assert len(tr.silence_cuts) == 2
+
+    # All selected gaps trimmed: Delete restores them.
+    _select_rows(view, rows[:2])
+    view.delete_selection()
+    assert tr.silence_cuts == []
+
+
+def test_delete_removed_words_with_untrimmed_silence_removes_all(qapp):
+    view = _view_with_words(["a", "b"], qapp=qapp, gap=0.5)
+    tr = view.transcript
+    assert tr is not None
+    tr.delete([0, 1])
+    view.refresh()
+
+    # Words already removed, gap still kept: nothing gets restored.
+    model = view._model
+    rows = [model.row_for_word(0), *_silence_rows(view)[:1], model.row_for_word(1)]
+    _select_rows(view, rows)
+    view.delete_selection()
+    assert tr.removed == {0, 1}
+    assert len(tr.silence_cuts) == 1
 
 
 def test_delete_word_toggle_is_undoable(qapp):
