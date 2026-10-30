@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 
 
 class SettingsDialog(QDialog):
-    """Edit font, spacing, and retained silence after Trim Silence."""
+    """Edit font, spacing, and silence kept around words by Trim Silence."""
 
     def __init__(self, cfg: dict[str, Any], parent=None):
         super().__init__(parent)
@@ -51,23 +51,31 @@ class SettingsDialog(QDialog):
         self.pad_y_spin.setSuffix(" px")
         self.pad_y_spin.setValue(int(cfg.get("transcript_word_pad_y", 2)))
 
-        self.pause_spin = QDoubleSpinBox()
-        self.pause_spin.setRange(0.0, 1.0)
-        self.pause_spin.setSingleStep(0.05)
-        self.pause_spin.setDecimals(2)
-        self.pause_spin.setSuffix(" s")
-        self.pause_spin.setValue(float(cfg.get("silence_max_pause", 0.0)))
-        self.pause_spin.setToolTip(
-            "Silence kept on each side of a trimmed gap. "
-            "0 removes the entire gap (default)."
+        self.keep_after_spin = QDoubleSpinBox()
+        self.keep_after_spin.setRange(0.0, 1.0)
+        self.keep_after_spin.setSingleStep(0.01)
+        self.keep_after_spin.setDecimals(2)
+        self.keep_after_spin.setSuffix(" s")
+        self.keep_after_spin.setValue(float(cfg.get("silence_keep_after", 0.20)))
+        self.keep_after_spin.setToolTip(
+            "Silence kept after each word when trimming, so word endings aren't clipped."
         )
+
+        self.keep_before_spin = QDoubleSpinBox()
+        self.keep_before_spin.setRange(0.0, 1.0)
+        self.keep_before_spin.setSingleStep(0.01)
+        self.keep_before_spin.setDecimals(2)
+        self.keep_before_spin.setSuffix(" s")
+        self.keep_before_spin.setValue(float(cfg.get("silence_keep_before", 0.03)))
+        self.keep_before_spin.setToolTip("Silence kept before each word when trimming.")
 
         form.addRow("Font", self.font_combo)
         form.addRow("Size", self.size_spin)
         form.addRow("Word spacing", self.spacing_spin)
         form.addRow("Horizontal pad", self.pad_x_spin)
         form.addRow("Vertical pad", self.pad_y_spin)
-        form.addRow("Retained silence", self.pause_spin)
+        form.addRow("Keep after word", self.keep_after_spin)
+        form.addRow("Keep before word", self.keep_before_spin)
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(
@@ -84,5 +92,6 @@ class SettingsDialog(QDialog):
             "transcript_word_spacing": self.spacing_spin.value(),
             "transcript_word_pad_x": self.pad_x_spin.value(),
             "transcript_word_pad_y": self.pad_y_spin.value(),
-            "silence_max_pause": self.pause_spin.value(),
+            "silence_keep_after": self.keep_after_spin.value(),
+            "silence_keep_before": self.keep_before_spin.value(),
         }

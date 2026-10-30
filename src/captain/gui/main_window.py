@@ -344,7 +344,8 @@ class MainWindow(QMainWindow):
         self.view.setObjectName("transcript")
         self.view.set_silence_thresholds(
             SILENCE_DISPLAY_MIN,
-            self.cfg["silence_max_pause"],
+            self.cfg["silence_keep_after"],
+            self.cfg["silence_keep_before"],
         )
         self.view.edited.connect(self._on_edited)
         self.view.word_activated.connect(self._on_transcript_word)
@@ -626,7 +627,8 @@ class MainWindow(QMainWindow):
         self._apply_typography_from_cfg()
         self.view.set_silence_thresholds(
             SILENCE_DISPLAY_MIN,
-            self.cfg["silence_max_pause"],
+            self.cfg["silence_keep_after"],
+            self.cfg["silence_keep_before"],
         )
         self._status("Settings saved")
 
@@ -963,7 +965,8 @@ class MainWindow(QMainWindow):
             self.view.set_timeline_context(clip.timeline_start_frame, clip.fps)
         self.view.set_silence_thresholds(
             SILENCE_DISPLAY_MIN,
-            self.cfg["silence_max_pause"],
+            self.cfg["silence_keep_after"],
+            self.cfg["silence_keep_before"],
         )
         self._apply_typography_from_cfg()
         self.view.set_transcript(transcript)
@@ -1210,7 +1213,8 @@ class MainWindow(QMainWindow):
         cuts = find_silence_gaps(
             transcript,
             min_duration=SILENCE_DISPLAY_MIN,
-            max_pause=self.cfg["silence_max_pause"],
+            keep_after=self.cfg["silence_keep_after"],
+            keep_before=self.cfg["silence_keep_before"],
         )
         transcript.silence_cuts = cuts
         self.view.refresh()

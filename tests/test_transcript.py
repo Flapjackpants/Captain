@@ -101,7 +101,7 @@ def test_move_reorders_output():
 
 def test_silence_cuts_excised():
     tr = make_transcript(["a", "b"], gap=2.0)
-    cuts = find_silence_gaps(tr, min_duration=1.0, max_pause=0.25)
+    cuts = find_silence_gaps(tr, min_duration=1.0, keep_after=0.25, keep_before=0.25)
     assert len(cuts) >= 1
     tr.silence_cuts = cuts
     ranges = tr.keep_ranges()
@@ -110,20 +110,20 @@ def test_silence_cuts_excised():
     assert total < tr.duration
 
 
-def test_silence_respects_max_pause():
+def test_silence_respects_keep_pads():
     tr = make_transcript(["a", "b"], gap=2.0)
     (cut,) = [
-        c for c in find_silence_gaps(tr, 1.0, 0.25)
+        c for c in find_silence_gaps(tr, 1.0, 0.25, 0.25)
         if c[0] > tr.words[0].end - 1e-9 and c[1] < tr.words[1].start + 1e-9
     ]
     assert cut[0] == pytest.approx(tr.words[0].end + 0.25)
     assert cut[1] == pytest.approx(tr.words[1].start - 0.25)
 
 
-def test_silence_max_pause_zero_cuts_full_gap():
+def test_silence_zero_pads_cut_full_gap():
     tr = make_transcript(["a", "b"], gap=0.5)
     gap_start, gap_end = tr.words[0].end, tr.words[1].start
-    cuts = find_silence_gaps(tr, min_duration=0.1, max_pause=0.0)
+    cuts = find_silence_gaps(tr, min_duration=0.1, keep_after=0.0, keep_before=0.0)
     (cut,) = [
         c for c in cuts
         if c[0] >= gap_start - 1e-9 and c[1] <= gap_end + 1e-9
@@ -138,7 +138,7 @@ def test_silence_short_visible_gap_trimmed_with_zero_pause():
     tr = make_transcript(["a", "b"], gap=0.15)
     gap_start, gap_end = tr.words[0].end, tr.words[1].start
     assert gap_end - gap_start >= SILENCE_DISPLAY_MIN
-    cuts = find_silence_gaps(tr, min_duration=SILENCE_DISPLAY_MIN, max_pause=0.0)
+    cuts = find_silence_gaps(tr, min_duration=SILENCE_DISPLAY_MIN, keep_after=0.0, keep_before=0.0)
     assert any(
         c[0] == pytest.approx(gap_start) and c[1] == pytest.approx(gap_end)
         for c in cuts
@@ -154,7 +154,7 @@ def test_find_silence_gaps_follows_display_order():
     ]
     tr = Transcript(words=words, duration=2.0)
     tr.order = [0, 2, 1]  # a, c, b — gap a→c is 0.1s, c→b is 0.3s
-    cuts = find_silence_gaps(tr, min_duration=0.1, max_pause=0.0)
+    cuts = find_silence_gaps(tr, min_duration=0.1, keep_after=0.0, keep_before=0.0)
     # Source-order would mark a→b (0.7s); display order marks a→c and c→b.
     assert (0.3, 0.4) in [(round(s, 4), round(e, 4)) for s, e in cuts]
     assert (0.7, 1.0) in [(round(s, 4), round(e, 4)) for s, e in cuts]
@@ -248,7 +248,7 @@ def test_gap_always_visible_trimmed_only_with_cut():
     gap_start, gap_end = tr.words[0].end, tr.words[1].start
     assert gap_end - gap_start >= 1.0
     assert not gap_is_trimmed(gap_start, gap_end, [])
-    cuts = find_silence_gaps(tr, min_duration=1.0, max_pause=0.25)
+    cuts = find_silence_gaps(tr, min_duration=1.0, keep_after=0.25, keep_before=0.25)
     assert gap_is_trimmed(gap_start, gap_end, cuts)
     # Midpoint matching: only cuts for this gap
     in_gap = cuts_in_gap(cuts, gap_start, gap_end)
@@ -260,10 +260,10 @@ def test_silence_delete_toggles_cut_membership():
     """Delete on a marker: untrimmed → add shrunk cut; trimmed → remove cut."""
     tr = make_transcript(["a", "b"], gap=2.0)
     gap_start, gap_end = tr.words[0].end, tr.words[1].start
-    max_pause = 0.25
+    pad = 0.25
     assert not gap_is_trimmed(gap_start, gap_end, tr.silence_cuts)
 
-    cut = shrink_silence_cut(gap_start, gap_end, max_pause)
+    cut = shrink_silence_cut(gap_start, gap_end, pad, pad)
     assert cut is not None
     tr.silence_cuts = [cut]
     assert gap_is_trimmed(gap_start, gap_end, tr.silence_cuts)
@@ -276,7 +276,7 @@ def test_silence_delete_toggles_cut_membership():
     assert not gap_is_trimmed(gap_start, gap_end, tr.silence_cuts)
 
     # Toggle on again
-    again = shrink_silence_cut(gap_start, gap_end, max_pause)
+    again = shrink_silence_cut(gap_start, gap_end, pad, pad)
     assert again == cut
     tr.silence_cuts = [again]
     assert gap_is_trimmed(gap_start, gap_end, tr.silence_cuts)
@@ -284,7 +284,7 @@ def test_silence_delete_toggles_cut_membership():
 
 def test_silence_cut_restore_by_removing_cut():
     tr = make_transcript(["a", "b"], gap=2.0)
-    cuts = find_silence_gaps(tr, min_duration=1.0, max_pause=0.25)
+    cuts = find_silence_gaps(tr, min_duration=1.0, keep_after=0.25, keep_before=0.25)
     assert cuts
     tr.silence_cuts = list(cuts)
     # Simulate deleting one silence marker: drop that cut.
@@ -645,3 +645,39 @@ def test_transcript_typography_defaults():
         "transcript_word_pad_y",
     ):
         assert key in cfg
+
+
+def test_silence_keeps_tail_after_word_and_short_lead():
+    tr = make_transcript(["a", "b"], gap=2.0)
+    (cut,) = [
+        c for c in find_silence_gaps(tr, 1.0, keep_after=0.2, keep_before=0.03)
+        if c[0] > tr.words[0].end - 1e-9 and c[1] < tr.words[1].start + 1e-9
+    ]
+    assert cut[0] == pytest.approx(tr.words[0].end + 0.2)
+    assert cut[1] == pytest.approx(tr.words[1].start - 0.03)
+
+
+def test_silence_lead_in_keeps_only_before_pad():
+    tr = Transcript(
+        words=[Word(0, "a", 1.5, 1.9), Word(1, "b", 2.0, 2.4)], duration=2.9
+    )
+    cuts = find_silence_gaps(tr, 1.0, keep_after=0.2, keep_before=0.03)
+    assert cuts[0] == (pytest.approx(0.0), pytest.approx(1.5 - 0.03))
+
+
+def test_silence_trail_out_keeps_only_after_pad():
+    tr = make_transcript(["a", "b"], gap=0.1, tail=2.0)
+    cuts = find_silence_gaps(tr, 1.0, keep_after=0.2, keep_before=0.03)
+    assert cuts[-1] == (
+        pytest.approx(tr.words[-1].end + 0.2),
+        pytest.approx(tr.duration),
+    )
+
+
+def test_shrink_silence_cut_none_when_pads_cover_gap():
+    assert shrink_silence_cut(1.0, 1.2, 0.2, 0.03) is None
+    assert shrink_silence_cut(1.0, 1.2, 0.1, 0.1) is None
+    assert shrink_silence_cut(1.0, 1.2, -0.5, -0.5) == (
+        pytest.approx(1.0),
+        pytest.approx(1.2),
+    )

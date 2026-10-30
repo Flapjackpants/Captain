@@ -35,7 +35,7 @@ def _model_with_gap(gap: float, *, qapp) -> TranscriptModel:
     ]
     tr = Transcript(words=words, duration=words[-1].end)
     model = TranscriptModel()
-    model.set_silence_thresholds(min_duration=SILENCE_DISPLAY_MIN, max_pause=0.0)
+    model.set_silence_thresholds(SILENCE_DISPLAY_MIN, 0.0, 0.0)
     model.set_transcript(tr)
     return model
 
@@ -77,7 +77,7 @@ def _view_with_words(texts: list[str], *, qapp, gap: float = 0.1) -> TranscriptV
         t += 0.3 + gap
     tr = Transcript(words=words, duration=t + 0.5)
     view = TranscriptView()
-    view.set_silence_thresholds(SILENCE_DISPLAY_MIN, 0.0)
+    view.set_silence_thresholds(SILENCE_DISPLAY_MIN, 0.0, 0.0)
     view.set_transcript(tr)
     return view
 
@@ -180,7 +180,7 @@ def test_backspace_merges_manual_caption_break(qapp):
 
 def test_delete_trims_short_visible_silence_with_zero_pause(qapp):
     view = _view_with_words(["a", "b"], qapp=qapp, gap=0.15)
-    view.set_silence_thresholds(SILENCE_DISPLAY_MIN, 0.0)
+    view.set_silence_thresholds(SILENCE_DISPLAY_MIN, 0.0, 0.0)
     view.refresh()
     tr = view.transcript
     assert tr is not None
@@ -477,7 +477,7 @@ def _view_with_segments(segs: list[int], *, qapp) -> TranscriptView:
         t += 0.4
     tr = Transcript(words=words, duration=t + 0.5)
     view = TranscriptView()
-    view.set_silence_thresholds(SILENCE_DISPLAY_MIN, 0.0)
+    view.set_silence_thresholds(SILENCE_DISPLAY_MIN, 0.0, 0.0)
     view.set_transcript(tr)
     return view
 
@@ -615,3 +615,39 @@ def test_line_menu_split_and_disabled_merge(qapp):
     first = view._line_menu_for_row(_line_rows(view)[0])
     assert not _action(first, "Merge with previous line").isEnabled()
     assert view._line_menu_for_row(-1) is None
+
+
+def test_delete_silence_marker_uses_asymmetric_pads(qapp):
+    from captain.transcript import shrink_silence_cut
+
+    view = _view_with_words(["a", "b"], qapp=qapp, gap=1.0)
+    view.set_silence_thresholds(SILENCE_DISPLAY_MIN, 0.2, 0.03)
+    view.refresh()
+    tr = view.transcript
+    assert tr is not None
+    model = view._model
+    gap = (tr.words[0].end, tr.words[1].start)
+    rows = [
+        i
+        for i in range(model.rowCount())
+        if model.data(model.index(i), KIND_ROLE) == "silence"
+    ]
+    sm = view.selectionModel()
+    sm.clearSelection()
+    sm.select(model.index(rows[0]), sm.SelectionFlag.ClearAndSelect)
+    view.delete_selection()
+    expected = shrink_silence_cut(gap[0], gap[1], 0.2, 0.03)
+    assert expected is not None
+    assert any(
+        c[0] == pytest.approx(expected[0]) and c[1] == pytest.approx(expected[1])
+        for c in tr.silence_cuts
+    )
+
+
+def test_settings_dialog_returns_silence_pads(qapp):
+    from captain.gui.settings_dialog import SettingsDialog
+
+    vals = SettingsDialog({}, None).values()
+    assert vals["silence_keep_after"] == pytest.approx(0.20)
+    assert vals["silence_keep_before"] == pytest.approx(0.03)
+    assert not any("pause" in k for k in vals)

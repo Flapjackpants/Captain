@@ -67,11 +67,15 @@ class TranscriptModel(QAbstractListModel):
         self._fps: float = 24.0
         self._viewport_width: int = 400
         # Used by delete_selection when adding Trim Silence–style cuts.
-        self._silence_max_pause: float = 0.0
+        self._silence_keep_after: float = 0.20
+        self._silence_keep_before: float = 0.03
 
-    def set_silence_thresholds(self, min_duration: float, max_pause: float) -> None:
+    def set_silence_thresholds(
+        self, min_duration: float, keep_after: float, keep_before: float
+    ) -> None:
         # min_duration is retained for API compatibility; markers use SILENCE_DISPLAY_MIN.
-        self._silence_max_pause = float(max_pause)
+        self._silence_keep_after = float(keep_after)
+        self._silence_keep_before = float(keep_before)
         if self.transcript is not None:
             self.refresh()
 
@@ -510,8 +514,10 @@ class TranscriptView(QListView):
         self._caret = 0
         self._caret_anchor = None
 
-    def set_silence_thresholds(self, min_duration: float, max_pause: float) -> None:
-        self._model.set_silence_thresholds(min_duration, max_pause)
+    def set_silence_thresholds(
+        self, min_duration: float, keep_after: float, keep_before: float
+    ) -> None:
+        self._model.set_silence_thresholds(min_duration, keep_after, keep_before)
 
     def set_timeline_context(self, timeline_start_frame: int, fps: float) -> None:
         self._model.set_timeline_context(timeline_start_frame, fps)
@@ -796,7 +802,9 @@ class TranscriptView(QListView):
             if to_remove:
                 self.transcript.delete(to_remove)
         if silences:
-            max_pause = self._model._silence_max_pause
+            keep_after = self._model._silence_keep_after
+            keep_before = self._model._silence_keep_before
+            tr = self.transcript
             cuts = list(self.transcript.silence_cuts)
             for gap_start, gap_end, trimmed in silences:
                 if trimmed:
@@ -811,7 +819,14 @@ class TranscriptView(QListView):
                     ]
                 else:
                     # Trim: add shrunk cut matching Trim Silence.
-                    cut = shrink_silence_cut(gap_start, gap_end, max_pause)
+                    lead = gap_start <= 1e-9
+                    trail = gap_end >= tr.duration - 1e-9
+                    cut = shrink_silence_cut(
+                        gap_start,
+                        gap_end,
+                        0.0 if lead else keep_after,
+                        0.0 if trail else keep_before,
+                    )
                     if cut is not None:
                         key = (round(cut[0], 4), round(cut[1], 4))
                         if not any(

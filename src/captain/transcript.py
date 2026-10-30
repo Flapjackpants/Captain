@@ -427,44 +427,50 @@ def _norm(text: str) -> str:
 
 
 def find_silence_gaps(
-    transcript: Transcript, min_duration: float, max_pause: float
+    transcript: Transcript, min_duration: float, keep_after: float, keep_before: float
 ) -> list[tuple[float, float]]:
     """Gaps between consecutive *display-order* words longer than min_duration,
-    shrunk to retain ``max_pause`` of silence on each side of the cut.
+    shrunk to keep ``keep_after`` seconds after the previous word and
+    ``keep_before`` seconds before the next word.
 
     Walks ``transcript.order`` (plus lead-in / trail-out) so cuts match the
-    silence markers shown in the UI.
+    silence markers shown in the UI. The lead-in gap keeps only ``keep_before``;
+    the trail-out gap keeps only ``keep_after``.
     """
     cuts: list[tuple[float, float]] = []
     words = transcript.words
     order = transcript.order
     if not order:
         return cuts
-    boundaries: list[tuple[float, float]] = [(0.0, words[order[0]].start)]
+    # (gap_start, gap_end, pad after previous word, pad before next word)
+    boundaries: list[tuple[float, float, float, float]] = [
+        (0.0, words[order[0]].start, 0.0, keep_before)
+    ]
     for i in range(len(order) - 1):
         prev = words[order[i]]
         cur = words[order[i + 1]]
-        boundaries.append((prev.end, cur.start))
-    boundaries.append((words[order[-1]].end, transcript.duration))
-    for gap_start, gap_end in boundaries:
+        boundaries.append((prev.end, cur.start, keep_after, keep_before))
+    boundaries.append((words[order[-1]].end, transcript.duration, keep_after, 0.0))
+    for gap_start, gap_end, after, before in boundaries:
         if gap_end - gap_start < min_duration:
             continue
-        cut = shrink_silence_cut(gap_start, gap_end, max_pause)
+        cut = shrink_silence_cut(gap_start, gap_end, after, before)
         if cut is not None:
             cuts.append(cut)
     return cuts
 
 
 def shrink_silence_cut(
-    gap_start: float, gap_end: float, max_pause: float
+    gap_start: float, gap_end: float, keep_after: float, keep_before: float
 ) -> tuple[float, float] | None:
-    """Return the excised interior of a gap, retaining max_pause on each side.
+    """Excise a gap's interior, keeping ``keep_after`` seconds after the previous
+    word's end and ``keep_before`` seconds before the next word's start.
 
-    With ``max_pause=0`` the entire gap is cut. Returns None when the gap is
-    too short to leave a non-empty interior after retaining the pause.
+    With both pads 0 the entire gap is cut. Negative pads count as 0. Returns
+    None when less than 1e-3 s would be cut.
     """
-    keep = max(0.0, float(max_pause))
-    cs, ce = gap_start + keep, gap_end - keep
+    cs = gap_start + max(0.0, float(keep_after))
+    ce = gap_end - max(0.0, float(keep_before))
     if ce - cs <= 1e-3:
         return None
     return (cs, ce)
