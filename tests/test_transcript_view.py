@@ -10,7 +10,12 @@ from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import QApplication
 
-from captain.gui.transcript_view import KIND_ROLE, TranscriptModel, TranscriptView
+from captain.gui.transcript_view import (
+    KIND_ROLE,
+    LINE_END_ROLE,
+    TranscriptModel,
+    TranscriptView,
+)
 from captain.transcript import SILENCE_DISPLAY_MIN, Transcript, Word
 
 
@@ -462,3 +467,151 @@ def test_caret_hidden_with_multi_word_selection(qapp):
     sm.select(view._model.index(view._model.row_for_word(2)), sm.SelectionFlag.Select)
     assert len(view._selected_word_indices()) == 2
     assert view._caret_rect() is None
+
+
+def _view_with_segments(segs: list[int], *, qapp) -> TranscriptView:
+    words = []
+    t = 0.0
+    for i, seg in enumerate(segs):
+        words.append(Word(index=i, text=f"w{i}", start=t, end=t + 0.3, segment_id=seg))
+        t += 0.4
+    tr = Transcript(words=words, duration=t + 0.5)
+    view = TranscriptView()
+    view.set_silence_thresholds(SILENCE_DISPLAY_MIN, 0.0)
+    view.set_transcript(tr)
+    return view
+
+
+def _lines(view):
+    return [l.word_indices for l in view.transcript.lines()]
+
+
+def test_backspace_at_line_start_merges_automatic_line(qapp):
+    view = _view_with_segments([1, 1, 2, 2], qapp=qapp)
+    tr = view.transcript
+    view.set_caret(2)
+    view.selectionModel().clearSelection()
+    _key(view, qapp, Qt.Key.Key_Backspace)
+    assert _lines(view) == [(0, 1, 2, 3)]
+    assert 2 in tr.caption_joins
+    assert tr.removed == set()
+    assert view.undo()
+    assert _lines(view) == [(0, 1), (2, 3)]
+
+
+def test_delete_without_selection_merges_line_at_caret(qapp):
+    view = _view_with_segments([1, 1, 2, 2], qapp=qapp)
+    view.set_caret(2)
+    view.selectionModel().clearSelection()
+    _key(view, qapp, Qt.Key.Key_Delete)
+    assert _lines(view) == [(0, 1, 2, 3)]
+
+
+def test_backspace_mid_line_without_selection_does_nothing(qapp):
+    view = _view_with_segments([1, 1, 2, 2], qapp=qapp)
+    view.set_caret(1)
+    view.selectionModel().clearSelection()
+    _key(view, qapp, Qt.Key.Key_Backspace)
+    assert _lines(view) == [(0, 1), (2, 3)]
+    assert view.transcript.removed == set()
+
+
+def test_return_splits_at_caret_without_selection(qapp):
+    view = _view_with_segments([1, 1, 1, 1], qapp=qapp)
+    tr = view.transcript
+    view.set_caret(1)
+    view.selectionModel().clearSelection()
+    _key(view, qapp, Qt.Key.Key_Return)
+    assert _lines(view) == [(0,), (1, 2, 3)]
+    _key(view, qapp, Qt.Key.Key_Backspace)
+    assert _lines(view) == [(0, 1, 2, 3)]
+
+    view = _view_with_segments([1, 1, 2, 2], qapp=qapp)
+    tr = view.transcript
+    view.set_caret(2)
+    view.selectionModel().clearSelection()
+    _key(view, qapp, Qt.Key.Key_Backspace)
+    assert _lines(view) == [(0, 1, 2, 3)]
+    view.set_caret(2)
+    _key(view, qapp, Qt.Key.Key_Return)
+    assert _lines(view) == [(0, 1), (2, 3)]
+    assert tr.caption_joins == set()
+    assert tr.caption_breaks == set()
+
+
+def test_paste_inserts_at_caret(qapp):
+    view = _view_with_words(["a", "b", "c", "d", "e"], qapp=qapp)
+    tr = view.transcript
+    view.select_word(3)
+    view.cut_selection()
+    view.set_caret(1)
+    view.selectionModel().clearSelection()
+    view.paste_at_current()
+    assert tr.order[:4] == [0, 3, 1, 2]
+    assert view.caret_position() == 2
+    assert 3 not in tr.removed
+
+
+def test_paste_at_line_start_lands_in_that_line(qapp):
+    view = _view_with_segments([1, 1, 2, 2, 3], qapp=qapp)
+    tr = view.transcript
+    view.select_word(4)
+    view.cut_selection()
+    view.set_caret(2)
+    view.selectionModel().clearSelection()
+    view.paste_at_current()
+    assert tr.lines()[1].word_indices == (4, 2, 3)
+
+
+def test_line_end_role_marks_manual_and_auto(qapp):
+    view = _view_with_segments([1, 1, 2, 2], qapp=qapp)
+    model = view._model
+
+    def role(w):
+        return model.data(model.index(model.row_for_word(w)), LINE_END_ROLE)
+
+    assert role(1) == "auto"
+    assert role(3) is None
+    assert role(0) is None
+
+    view = _view_with_segments([1, 1, 1, 1], qapp=qapp)
+    model = view._model
+    view.set_caret(2)
+    view.selectionModel().clearSelection()
+    _key(view, qapp, Qt.Key.Key_Return)
+    assert role(1) == "manual"
+    assert role(3) is None
+
+
+def _line_rows(view):
+    m = view._model
+    return [i for i in range(m.rowCount()) if m.data(m.index(i), KIND_ROLE) == "line"]
+
+
+def _action(menu, text):
+    return next(a for a in menu.actions() if a.text() == text)
+
+
+def test_line_menu_merges_from_header(qapp):
+    view = _view_with_segments([1, 1, 2, 2], qapp=qapp)
+    row = _line_rows(view)[1]
+    menu = view._line_menu_for_row(row)
+    assert menu is not None
+    action = _action(menu, "Merge with previous line")
+    assert action.isEnabled()
+    action.trigger()
+    assert _lines(view) == [(0, 1, 2, 3)]
+
+
+def test_line_menu_split_and_disabled_merge(qapp):
+    view = _view_with_segments([1, 1, 1, 1], qapp=qapp)
+    model = view._model
+    menu = view._line_menu_for_row(model.row_for_word(2))
+    split = _action(menu, "Split line here")
+    assert split.isEnabled()
+    split.trigger()
+    assert _lines(view) == [(0, 1), (2, 3)]
+
+    first = view._line_menu_for_row(_line_rows(view)[0])
+    assert not _action(first, "Merge with previous line").isEnabled()
+    assert view._line_menu_for_row(-1) is None

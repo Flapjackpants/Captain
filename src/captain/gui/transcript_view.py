@@ -21,7 +21,7 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QKeySequence, QPainter, QPen
-from PySide6.QtWidgets import QListView, QStyle, QStyledItemDelegate
+from PySide6.QtWidgets import QListView, QMenu, QStyle, QStyledItemDelegate
 
 from ..transcript import (
     SILENCE_DISPLAY_MIN,
@@ -50,6 +50,7 @@ LINE_ROLE = Qt.ItemDataRole.UserRole + 3  # TranscriptLine
 MATCH_ROLE = Qt.ItemDataRole.UserRole + 4  # bool
 SILENCE_ROLE = Qt.ItemDataRole.UserRole + 5  # (start, end, trimmed)
 STATUS_ROLE = Qt.ItemDataRole.UserRole + 6  # compare status: match|mismatch|extra|None
+LINE_END_ROLE = Qt.ItemDataRole.UserRole + 7  # word rows: "manual" | "auto" | None
 
 
 class TranscriptModel(QAbstractListModel):
@@ -61,6 +62,7 @@ class TranscriptModel(QAbstractListModel):
         self._rows: list[tuple[str, object]] = []
         self._match_words: set[int] = set()
         self._compare_statuses: dict[int, str] = {}
+        self._line_end_kind: dict[int, str] = {}
         self._timeline_start_frame: int = 0
         self._fps: float = 24.0
         self._viewport_width: int = 400
@@ -131,6 +133,7 @@ class TranscriptModel(QAbstractListModel):
 
     def _rebuild_rows(self) -> None:
         self._rows = []
+        self._line_end_kind = {}
         if self.transcript is None:
             return
         tr = self.transcript
@@ -140,15 +143,19 @@ class TranscriptModel(QAbstractListModel):
                 self._append_silence_in_gap(0.0, tr.duration)
             return
 
-        line_starts = {line.word_indices[0] for line in tr.lines() if line.word_indices}
+        lines = tr.lines()
+        line_by_start = {
+            line.word_indices[0]: line for line in lines if line.word_indices
+        }
+        for line, nxt in zip(lines, lines[1:]):
+            self._line_end_kind[line.end_word] = (
+                "manual" if nxt.start_word in tr.caption_breaks else "auto"
+            )
         self._append_silence_in_gap(0.0, tr.words[order[0]].start)
 
         for i, widx in enumerate(order):
-            if widx in line_starts:
-                for line in tr.lines():
-                    if line.word_indices and line.word_indices[0] == widx:
-                        self._rows.append(("line", line))
-                        break
+            if widx in line_by_start:
+                self._rows.append(("line", line_by_start[widx]))
             if i > 0:
                 prev = tr.words[order[i - 1]]
                 cur = tr.words[widx]
@@ -270,6 +277,8 @@ class TranscriptModel(QAbstractListModel):
             return widx in self._match_words
         if role == STATUS_ROLE:
             return self._compare_statuses.get(widx)
+        if role == LINE_END_ROLE:
+            return self._line_end_kind.get(widx)
         if role == Qt.ItemDataRole.ToolTipRole:
             frame = media_sec_to_timeline_frame(
                 word.start, self._timeline_start_frame, self._fps
@@ -325,8 +334,11 @@ class WordDelegate(QStyledItemDelegate):
             return QSize(option.rect.width() or 400, 22)
         fm = QFontMetrics(self.font)
         text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        glyph_w = 0
+        if kind == "word" and index.data(LINE_END_ROLE) is not None:
+            glyph_w = fm.horizontalAdvance(" ↵")
         return QSize(
-            fm.horizontalAdvance(text) + self.pad_x * 2,
+            fm.horizontalAdvance(text) + glyph_w + self.pad_x * 2,
             fm.height() + self.pad_y * 2,
         )
 
@@ -378,6 +390,13 @@ class WordDelegate(QStyledItemDelegate):
             return
 
         painter.setFont(self.font)
+        line_end = index.data(LINE_END_ROLE)
+        glyph_w = (
+            QFontMetrics(self.font).horizontalAdvance(" ↵")
+            if line_end is not None
+            else 0
+        )
+        word_rect = rect.adjusted(0, 0, -glyph_w, 0)
         _widx, removed = index.data(WORD_ROLE)
         is_match = bool(index.data(MATCH_ROLE))
         compare_status = index.data(STATUS_ROLE)
@@ -402,16 +421,32 @@ class WordDelegate(QStyledItemDelegate):
         painter.setPen(QPen(color))
 
         text = index.data(Qt.ItemDataRole.DisplayRole) or ""
-        text_rect = rect.adjusted(self.pad_x, self.pad_y, -self.pad_x, -self.pad_y)
+        text_rect = word_rect.adjusted(
+            self.pad_x, self.pad_y, -self.pad_x, -self.pad_y
+        )
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignCenter, text)
 
         if removed:
             fm = QFontMetrics(self.font)
             width = fm.horizontalAdvance(text)
-            y = rect.center().y()
-            x0 = rect.center().x() - width // 2
+            y = word_rect.center().y()
+            x0 = word_rect.center().x() - width // 2
             painter.drawLine(x0, y, x0 + width, y)
         painter.restore()
+
+        if line_end is not None:
+            painter.save()
+            painter.setFont(self.font)
+            if line_end == "manual":
+                painter.setPen(QPen(QColor(110, 160, 230)))
+            else:
+                painter.setPen(QPen(QColor(135, 135, 143, 150)))
+            painter.drawText(
+                rect.adjusted(rect.width() - glyph_w, 0, 0, 0),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                "↵",
+            )
+            painter.restore()
 
 
 class TranscriptView(QListView):
@@ -799,41 +834,35 @@ class TranscriptView(QListView):
     def paste_at_current(self) -> None:
         if not self._clipboard_words or self.transcript is None:
             return
+        tr = self.transcript
         self.push_history()
-        current = self.currentIndex()
-        if current.isValid():
-            kind = self._model.data(current, KIND_ROLE)
-            widx = self._model.word_index(current.row())
-            if kind == "word" and widx is not None:
-                try:
-                    dest_row = self.transcript.order.index(widx) + 1
-                except ValueError:
-                    dest_row = len(self.transcript.order)
-            else:
-                dest_row = len(self.transcript.order)
-        else:
-            dest_row = len(self.transcript.order)
+        dest_row = max(0, min(self._caret, len(tr.order)))
+        anchor_word = tr.order[dest_row] if dest_row < len(tr.order) else None
+        starts_line = anchor_word is not None and anchor_word in tr.line_starts()
         moving = set(self._clipboard_words)
-        dest_pos = sum(
-            1 for i in self.transcript.order[:dest_row] if i not in moving
-        )
-        self.transcript.move(self._clipboard_words, dest_pos)
-        self.transcript.restore(self._clipboard_words)
+        dest_pos = sum(1 for i in tr.order[:dest_row] if i not in moving)
+        tr.move(self._clipboard_words, dest_pos)
+        tr.restore(self._clipboard_words)
+        pasted = [w for w in tr.order if w in moving]
+        if starts_line and anchor_word not in moving and pasted:
+            tr.set_line_start(pasted[0], True)
+            tr.set_line_start(anchor_word, False)
         self._clipboard_words = []
-        self._model.set_transcript(self.transcript)
+        self._model.set_transcript(tr)
+        if pasted:
+            self.set_caret(tr.order.index(pasted[-1]) + 1)
         self.edited.emit()
 
     def keyPressEvent(self, event) -> None:
         if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             selected_words = self._selected_word_indices()
-            if (
-                event.key() == Qt.Key.Key_Backspace
-                and (
-                    not selected_words
-                    or selected_words == [self._current_word_index()]
-                )
-                and self._merge_caption_break_at_current()
-            ):
+            order = self.transcript.order if self.transcript is not None else []
+            caret_word = order[self._caret] if self._caret < len(order) else None
+            if event.key() == Qt.Key.Key_Backspace:
+                merge = not selected_words or selected_words == [caret_word]
+            else:
+                merge = not selected_words
+            if merge and self.merge_line_at_caret():
                 event.accept()
                 return
             self.delete_selection()
@@ -1032,43 +1061,89 @@ class TranscriptView(QListView):
             sm.clearSelection()
         self.set_caret(new)
 
-    def insert_caption_break(self) -> bool:
-        """Insert a persistent boundary before the selection/current word."""
-        if self.transcript is None:
+    def merge_line_at_caret(self) -> bool:
+        """Merge the line starting at the caret word into the previous line."""
+        tr = self.transcript
+        if tr is None or self._caret >= len(tr.order):
             return False
-        selected = self._selected_word_indices()
-        if selected:
-            before_word = selected[0]
-        else:
-            before_word = self._current_word_index()
-        if before_word is None:
-            return False
-        if (
-            before_word not in self.transcript.order
-            or before_word in self.transcript.caption_breaks
-        ):
-            return False
-        if any(line.start_word == before_word for line in self.transcript.lines()):
+        word = tr.order[self._caret]
+        if word not in tr.line_starts():
             return False
         self.push_history()
-        if not self.transcript.add_caption_break(before_word):
+        if not tr.join_line_at(word):
             return False
+        caret = self._caret
         self._model.refresh()
-        self._focus_word(before_word)
+        self.set_caret(caret, scroll=False)
         self.edited.emit()
         return True
 
-    def _merge_caption_break_at_current(self) -> bool:
-        """Remove a manual break at the current word for Backspace."""
-        if self.transcript is None:
+    def _line_menu_for_row(self, row: int) -> QMenu | None:
+        tr = self.transcript
+        if tr is None or row < 0:
+            return None
+        kind = self._model.data(self._model.index(row), KIND_ROLE)
+        if kind not in ("word", "line"):
+            return None
+        word = self._model.word_index(row)
+        if word is None:
+            return None
+        line = next((ln for ln in tr.lines() if word in ln.word_indices), None)
+        if line is None:
+            return None
+
+        def merge() -> None:
+            self.push_history()
+            if tr.join_line_at(line.start_word):
+                self._model.refresh()
+                self.set_caret(self._caret, scroll=False)
+                self.edited.emit()
+
+        def split() -> None:
+            self.push_history()
+            if tr.add_caption_break(word):
+                self._model.refresh()
+                self.set_caret(self._caret, scroll=False)
+                self.edited.emit()
+
+        menu = QMenu(self)
+        merge_action = menu.addAction("Merge with previous line")
+        merge_action.setEnabled(line.start_word in tr.line_starts())
+        merge_action.triggered.connect(merge)
+        split_action = menu.addAction("Split line here")
+        split_action.setEnabled(word != line.start_word)
+        split_action.triggered.connect(split)
+        return menu
+
+    def contextMenuEvent(self, event) -> None:
+        menu = self._line_menu_for_row(self._row_at_pos(event.pos()))
+        if menu is not None:
+            menu.exec(event.globalPos())
+        event.accept()
+
+    def insert_caption_break(self) -> bool:
+        """Split the line before the first selected word, or at the caret."""
+        tr = self.transcript
+        if tr is None:
             return False
-        word = self._current_word_index()
-        if word is None or word not in self.transcript.caption_breaks:
+        selected = self._selected_word_indices()
+        if selected:
+            target = selected[0]
+        elif self._caret < len(tr.order):
+            target = tr.order[self._caret]
+        else:
+            return False
+        if (
+            target not in tr.order
+            or target == tr.order[0]
+            or target in tr.line_starts()
+        ):
             return False
         self.push_history()
-        self.transcript.remove_caption_break(word)
+        if not tr.add_caption_break(target):
+            return False
         self._model.refresh()
-        self._focus_word(word)
+        self._focus_word(target)
         self.edited.emit()
         return True
 

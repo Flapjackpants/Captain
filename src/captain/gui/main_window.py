@@ -372,8 +372,10 @@ class MainWindow(QMainWindow):
 
         hint = QLabel(
             "Select words, then: Delete toggles remove/restore • "
-            "Return adds a caption break before selection/current word • "
-            "Backspace merges a manual break when no words are selected • "
+            "Return splits the line at the caret • "
+            "Backspace at a line start (or Delete) merges lines • "
+            "←/→/↑/↓ move the caret, Shift selects • "
+            "right-click a line to merge/split • "
             "Cmd/Ctrl+X cuts • Cmd/Ctrl+V pastes • Cmd/Ctrl+Z undo • "
             "Cmd/Ctrl+Shift+Z redo • "
             "click a word/timecode/silence jumps the playhead • "
