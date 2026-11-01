@@ -13,6 +13,15 @@ SYSTEM_SCRIPTS="/Library/Application Support/Blackmagic Design/DaVinci Resolve/F
 echo "Captain installer"
 echo "App directory: $APP_DIR"
 
+# Ignore our own venv if the shell has it active: it can't rebuild itself.
+unset VIRTUAL_ENV
+CLEAN_PATH=":$PATH:"
+while [[ "$CLEAN_PATH" == *":$VENV_DIR/bin:"* ]]; do
+    CLEAN_PATH="${CLEAN_PATH/":$VENV_DIR/bin:"/:}"
+done
+CLEAN_PATH="${CLEAN_PATH#:}"
+PATH="${CLEAN_PATH%:}"
+
 PYTHON=""
 for candidate in python3.12 python3.13 python3.11 python3; do
     if command -v "$candidate" >/dev/null 2>&1; then
@@ -32,10 +41,16 @@ fi
 
 echo
 echo "Creating virtualenv..."
-"$PYTHON" -m venv "$VENV_DIR"
-"$VENV_DIR/bin/pip" install --upgrade pip
+# Moving the checkout leaves the old path in the venv's script shebangs.
+if [ -d "$VENV_DIR" ] && ! "$VENV_DIR/bin/pip" --version >/dev/null 2>&1; then
+    echo "Existing virtualenv is broken (app folder moved?); rebuilding it."
+    "$PYTHON" -m venv --clear "$VENV_DIR"
+else
+    "$PYTHON" -m venv "$VENV_DIR"
+fi
+"$VENV_DIR/bin/python" -m pip install --upgrade pip
 echo "Installing dependencies (this downloads ML libraries; may take a while)..."
-"$VENV_DIR/bin/pip" install -r "$APP_DIR/requirements.txt"
+"$VENV_DIR/bin/python" -m pip install -r "$APP_DIR/requirements.txt"
 
 echo
 echo "Registering Captain with DaVinci Resolve (Workspace → Scripts → Captain)..."
