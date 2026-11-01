@@ -16,9 +16,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Any, Mapping
 
-from .compare import _edit_distance
-from .transcript import Transcript, _is_content_ngram, _norm
+from .compare import (
+    AlignmentResult,
+    _edit_distance,
+    drop_script_matched,
+    find_script_retakes,
+    merge_repeat_groups,
+)
+from .transcript import Transcript, _is_content_ngram, _norm, find_repeats
 
 
 @dataclass(frozen=True)
@@ -187,4 +194,31 @@ def find_retakes(
         taken.update(span)
         groups.append([live[k] for k in span])
     groups.sort(key=lambda g: g[0])
+    return groups
+
+
+def find_trim_groups(
+    transcript: Transcript,
+    cfg: Mapping[str, Any],
+    alignment: AlignmentResult | None = None,
+) -> list[list[int]]:
+    """Groups to strike for Remove Repeats, per the repeat settings in ``cfg``."""
+    min_pause = cfg.get("repeat_min_pause", 0.35)
+    if cfg.get("repeat_mode") == "exact":
+        groups = find_repeats(
+            transcript,
+            max_ngram=cfg.get("repeat_max_ngram", 8),
+            min_ngram=cfg.get("repeat_min_ngram", 4),
+            min_pause=min_pause,
+        )
+    else:
+        groups = find_retakes(
+            transcript,
+            sensitivity=cfg.get("repeat_sensitivity", "balanced"),
+            min_pause=min_pause,
+        )
+        if alignment is not None:
+            groups = drop_script_matched(groups, alignment)
+    if alignment is not None:
+        groups = merge_repeat_groups(groups + find_script_retakes(transcript, alignment))
     return groups

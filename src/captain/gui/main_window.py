@@ -42,16 +42,14 @@ from ..captions import build_caption_segments, normalize_caption_settings
 from ..compare import (
     AlignmentResult,
     align_transcript,
-    find_script_retakes,
     load_script,
-    merge_repeat_groups,
     parse_script,
 )
 from ..engine import Transcriber, extract_audio, extract_frame
+from ..retakes import find_trim_groups
 from ..transcript import (
     Transcript,
     SILENCE_DISPLAY_MIN,
-    find_repeats,
     find_silence_gaps,
     merge_timeline_transcripts,
 )
@@ -1237,16 +1235,7 @@ class MainWindow(QMainWindow):
         transcript = self.view.transcript
         if transcript is None:
             return
-        groups = find_repeats(
-            transcript,
-            max_ngram=self.cfg["repeat_max_ngram"],
-            min_ngram=self.cfg.get("repeat_min_ngram", 4),
-            min_pause=self.cfg.get("repeat_min_pause", 0.35),
-        )
-        if self._alignment is not None:
-            groups = merge_repeat_groups(
-                groups + find_script_retakes(transcript, self._alignment)
-            )
+        groups = find_trim_groups(transcript, self.cfg, self._alignment)
         if not groups:
             self._status("No retakes found")
             return

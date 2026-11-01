@@ -53,6 +53,9 @@ if all are already removed · Cmd+X / Cmd+V
 cut-paste · Cmd+Z / Cmd+Shift+Z undo/redo · click jumps the playhead ·
 **Trim Silence** / **Remove Repeats** for auto-trims · silence markers (`…`)
 show long gaps; struck = will be trimmed.
+**Remove Repeats** strikes false starts that the next phrase re-says, even with
+slightly different words. Settings switches between Smart and Exact detection and
+sets sensitivity; Cmd+Z reverts a pass.
 
 **Captions:** Select a video clip or place the playhead over one, then click
 **Create Captions**. Captions are Text+ title clips appended from a template in the
@@ -98,8 +101,8 @@ Apply modes: **replace in place** (default, non-ripple), **replace with ripple**
 or **new timeline** (`{clip} [Captain] {n}`).
 
 Config lives at `~/Library/Application Support/Captain/config.json`
-(Whisper model/device, language, silence thresholds, repeat n-gram size, and
-last-used caption settings).
+(Whisper model/device, language, silence thresholds, repeat detection mode and
+sensitivity, repeat n-gram size, and last-used caption settings).
 
 ## Development
 

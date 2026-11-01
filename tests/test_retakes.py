@@ -1,6 +1,8 @@
 import pytest
 
-from captain.retakes import _words_similar, find_retakes
+from captain import config
+from captain.compare import align_transcript, parse_script
+from captain.retakes import RETAKE_LEVELS, _words_similar, find_retakes, find_trim_groups
 from captain.transcript import Transcript, Word
 
 
@@ -168,3 +170,56 @@ def test_unknown_sensitivity_raises():
 )
 def test_words_similar(a, b, expected):
     assert _words_similar(a, b) is expected
+
+
+REWORDED = "I went to the store I went to the shop today"
+
+
+def test_config_sensitivities_match_levels():
+    assert set(config.REPEAT_SENSITIVITIES) == set(RETAKE_LEVELS)
+
+
+def test_trim_groups_defaults_to_smart():
+    assert find_trim_groups(build(REWORDED), {}) == [[0, 1, 2, 3, 4]]
+
+
+def test_trim_groups_exact_ignores_reworded():
+    assert find_trim_groups(build(REWORDED), {"repeat_mode": "exact"}) == []
+
+
+def test_trim_groups_exact_finds_identical():
+    tr = build("so I went home early I went home early then", pause_after=5)
+    assert find_trim_groups(tr, {"repeat_mode": "exact"}) == [[1, 2, 3, 4]]
+
+
+def test_trim_groups_uses_sensitivity():
+    tr = build(REWORDED)
+    assert find_trim_groups(tr, {"repeat_sensitivity": "conservative"}) == []
+
+
+def _alignment(tr, script):
+    return align_transcript(tr, parse_script(script))
+
+
+def test_trim_groups_script_keeps_parallel_phrases():
+    text = "we need to fix it we need to paint it"
+    tr = build(text)
+    assert find_trim_groups(tr, {}, _alignment(tr, text)) == []
+    assert find_trim_groups(tr, {}) == [[0, 1, 2, 3, 4]]
+
+
+def test_trim_groups_script_confirms_retake():
+    tr = build("we need to fix it we need to paint it")
+    assert find_trim_groups(tr, {}, _alignment(tr, "we need to paint it")) == [
+        [0, 1, 2, 3, 4]
+    ]
+
+
+def test_trim_groups_exact_merges_script_retakes():
+    tr = build("I went home early I went home early then")
+    groups = find_trim_groups(
+        tr, {"repeat_mode": "exact"}, _alignment(tr, "I went home early then")
+    )
+    assert groups
+    for g in groups:
+        assert g == list(range(g[0], g[-1] + 1))

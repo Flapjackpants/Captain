@@ -386,6 +386,23 @@ def merge_repeat_groups(groups: list[list[int]]) -> list[list[int]]:
     return merged
 
 
+def drop_script_matched(
+    groups: list[list[int]], alignment: AlignmentResult
+) -> list[list[int]]:
+    """Drop groups where strictly more than half the words match the script.
+
+    The script says those words belong, so they are not false starts.
+    """
+    statuses = alignment.video_statuses()
+    kept: list[list[int]] = []
+    for group in groups:
+        matched = sum(1 for i in group if statuses.get(i) == "match")
+        if matched * 2 > len(group):
+            continue
+        kept.append(group)
+    return kept
+
+
 def find_script_retakes(
     transcript: Transcript,
     alignment: AlignmentResult,

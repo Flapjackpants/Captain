@@ -6,6 +6,7 @@ from captain.compare import (
     align_transcript,
     align_words,
     detect_script_format,
+    drop_script_matched,
     find_script_retakes,
     merge_repeat_groups,
     parse_script,
@@ -184,3 +185,10 @@ def test_script_text_json_roundtrip():
     tr = Transcript(words=words, duration=1.0, script_text="Hello there")
     tr2 = Transcript.from_json(tr.to_json())
     assert tr2.script_text == "Hello there"
+
+
+def test_drop_script_matched():
+    alignment = align_words(["a", "b"], ["a", "b", "c", "d"])
+    assert drop_script_matched([[0, 1, 2]], alignment) == []
+    assert drop_script_matched([[0, 1, 2, 3]], alignment) == [[0, 1, 2, 3]]
+    assert drop_script_matched([[2, 3]], alignment) == [[2, 3]]

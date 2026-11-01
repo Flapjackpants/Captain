@@ -20,6 +20,8 @@ DEFAULTS: dict[str, Any] = {
     "silence_min_duration": 0.1,   # legacy; Trim Silence uses SILENCE_DISPLAY_MIN
     "silence_keep_after": 0.20,    # silence kept after a word's end when trimming; protects word tails
     "silence_keep_before": 0.03,   # silence kept before a word's start when trimming
+    "repeat_mode": "smart",        # "smart" (similar phrases) | "exact" (identical phrases)
+    "repeat_sensitivity": "balanced",  # smart mode: conservative | balanced | aggressive
     "repeat_min_ngram": 4,         # shortest phrase treated as a retake
     "repeat_max_ngram": 8,
     "repeat_min_pause": 0.35,      # pause between copies to count as a retake
@@ -37,6 +39,8 @@ DEFAULTS: dict[str, Any] = {
 
 APPLY_MODES = frozenset({"replace_in_place", "replace_ripple", "new_timeline"})
 WHISPER_MODELS: tuple[str, ...] = ("small", "medium", "large-v3-turbo", "large-v3")
+REPEAT_MODES: tuple[str, ...] = ("smart", "exact")
+REPEAT_SENSITIVITIES: tuple[str, ...] = ("conservative", "balanced", "aggressive")
 
 
 def normalize_apply_mode(mode: Any) -> str:
@@ -44,6 +48,20 @@ def normalize_apply_mode(mode: Any) -> str:
     if mode in APPLY_MODES:
         return str(mode)
     return str(DEFAULTS["apply_mode"])
+
+
+def normalize_repeat_mode(mode: Any) -> str:
+    """Return a valid repeat_mode; unknown or unhashable values fall back."""
+    if isinstance(mode, str) and mode in REPEAT_MODES:
+        return mode
+    return str(DEFAULTS["repeat_mode"])
+
+
+def normalize_repeat_sensitivity(level: Any) -> str:
+    """Return a valid repeat_sensitivity; unknown or unhashable values fall back."""
+    if isinstance(level, str) and level in REPEAT_SENSITIVITIES:
+        return level
+    return str(DEFAULTS["repeat_sensitivity"])
 
 
 def data_dir() -> Path:
@@ -83,6 +101,8 @@ def load_config() -> dict[str, Any]:
     if cfg.get("whisper_model") == "small" and not cfg.get("whisper_model_chosen"):
         cfg["whisper_model"] = DEFAULTS["whisper_model"]
     cfg["apply_mode"] = normalize_apply_mode(cfg.get("apply_mode"))
+    cfg["repeat_mode"] = normalize_repeat_mode(cfg.get("repeat_mode"))
+    cfg["repeat_sensitivity"] = normalize_repeat_sensitivity(cfg.get("repeat_sensitivity"))
     return cfg
 
 

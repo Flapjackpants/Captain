@@ -1,4 +1,4 @@
-"""Settings dialog for transcript typography and silence trim."""
+"""Settings dialog for transcript typography, silence trim and repeat detection."""
 
 from __future__ import annotations
 
@@ -16,11 +16,18 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from ..config import WHISPER_MODELS
+from ..config import (
+    REPEAT_MODES,
+    REPEAT_SENSITIVITIES,
+    WHISPER_MODELS,
+    normalize_repeat_mode,
+    normalize_repeat_sensitivity,
+)
 
 
 class SettingsDialog(QDialog):
-    """Edit font, spacing, and silence kept around words by Trim Silence."""
+    """Edit font, spacing, silence kept around words by Trim Silence, and how
+    Remove Repeats detects retakes (mode and sensitivity)."""
 
     def __init__(self, cfg: dict[str, Any], parent=None):
         super().__init__(parent)
@@ -84,6 +91,42 @@ class SettingsDialog(QDialog):
         self.keep_before_spin.setValue(float(cfg.get("silence_keep_before", 0.03)))
         self.keep_before_spin.setToolTip("Silence kept before each word when trimming.")
 
+        mode_labels = {
+            "smart": "Smart (similar phrases)",
+            "exact": "Exact (identical phrases)",
+        }
+        self.repeat_mode_combo = QComboBox()
+        for mode in REPEAT_MODES:
+            self.repeat_mode_combo.addItem(mode_labels[mode], mode)
+        self.repeat_mode_combo.setCurrentIndex(
+            self.repeat_mode_combo.findData(
+                normalize_repeat_mode(cfg.get("repeat_mode"))
+            )
+        )
+        self.repeat_mode_combo.setToolTip(
+            "Smart also catches false starts that the next phrase re-says with "
+            "slightly different words. Exact only removes identical phrases."
+        )
+
+        sensitivity_labels = {
+            "conservative": "Conservative",
+            "balanced": "Balanced",
+            "aggressive": "Aggressive",
+        }
+        self.repeat_sensitivity_combo = QComboBox()
+        for level in REPEAT_SENSITIVITIES:
+            self.repeat_sensitivity_combo.addItem(sensitivity_labels[level], level)
+        self.repeat_sensitivity_combo.setCurrentIndex(
+            self.repeat_sensitivity_combo.findData(
+                normalize_repeat_sensitivity(cfg.get("repeat_sensitivity"))
+            )
+        )
+        self.repeat_sensitivity_combo.setToolTip(
+            "Higher sensitivity catches more retakes but may strike phrases "
+            "you meant to keep."
+        )
+        self.repeat_mode_combo.currentIndexChanged.connect(self._sync_repeat_controls)
+
         form.addRow("Whisper model", self.model_combo)
         form.addRow("Font", self.font_combo)
         form.addRow("Size", self.size_spin)
@@ -92,6 +135,8 @@ class SettingsDialog(QDialog):
         form.addRow("Vertical pad", self.pad_y_spin)
         form.addRow("Keep after word", self.keep_after_spin)
         form.addRow("Keep before word", self.keep_before_spin)
+        form.addRow("Repeat detection", self.repeat_mode_combo)
+        form.addRow("Retake sensitivity", self.repeat_sensitivity_combo)
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(
@@ -100,6 +145,12 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self._sync_repeat_controls()
+
+    def _sync_repeat_controls(self) -> None:
+        self.repeat_sensitivity_combo.setEnabled(
+            self.repeat_mode_combo.currentData() != "exact"
+        )
 
     def values(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -110,6 +161,8 @@ class SettingsDialog(QDialog):
             "transcript_word_pad_y": self.pad_y_spin.value(),
             "silence_keep_after": self.keep_after_spin.value(),
             "silence_keep_before": self.keep_before_spin.value(),
+            "repeat_mode": self.repeat_mode_combo.currentData(),
+            "repeat_sensitivity": self.repeat_sensitivity_combo.currentData(),
         }
         model = self.model_combo.currentText()
         if model != self._initial_model:
