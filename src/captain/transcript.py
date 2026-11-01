@@ -521,6 +521,14 @@ def cuts_in_gap(
     return out
 
 
+def _is_content_ngram(tokens: list[str]) -> bool:
+    if not tokens or not all(tokens):
+        return False
+    if all(t.isdigit() for t in tokens):
+        return False
+    return any(sum(c.isalpha() for c in t) >= 2 for t in tokens)
+
+
 def find_repeats(
     transcript: Transcript,
     max_ngram: int = 8,
@@ -542,13 +550,6 @@ def find_repeats(
     claimed: set[int] = set()
     min_n = max(1, min_ngram)
     max_n = max(min_n, max_ngram)
-
-    def _is_content_ngram(tokens: list[str]) -> bool:
-        if not tokens or not all(tokens):
-            return False
-        if all(t.isdigit() for t in tokens):
-            return False
-        return any(sum(c.isalpha() for c in t) >= 2 for t in tokens)
 
     for n in range(max_n, min_n - 1, -1):
         i = 0
