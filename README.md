@@ -26,7 +26,7 @@ Python 3.11–3.13, FFmpeg on your PATH (`brew install ffmpeg`), ~2 GB for the
 Whisper model on first use.
 
 ```bash
-curl -fsSL https://github.com/Flapjackpants/Captain/archive/refs/tags/v1.0.0.tar.gz | tar xz && bash Captain-1.0.0/setupfiles/install-mac.sh
+curl -fsSL https://github.com/Flapjackpants/Captain/archive/refs/tags/v1.1.0.tar.gz | tar xz && bash Captain-1.1.0/setupfiles/install-mac.sh
 ```
 
 Fully quit and reopen Resolve, open a project, then:
